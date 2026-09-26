@@ -227,6 +227,15 @@
   .w.target{background:var(--amber-bg);border-bottom:2px solid var(--amber-line);font-weight:600;}
   .w.picked{background:rgba(84,116,143,.2);}
   .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:10px 0;border-bottom:1px solid rgba(230,233,220,.9);}
+  .confirm-back{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.45);
+    align-items:center;justify-content:center;padding:20px;}
+  .confirm-back.show{display:flex;}
+  .confirm-box{background:var(--surface);border-radius:var(--r-md);box-shadow:var(--shadow-lg);
+    padding:20px;max-width:340px;width:100%;}
+  .confirm-box .ttl{font-family:'Lora',serif;font-weight:600;font-size:17px;margin-bottom:8px;}
+  .confirm-box .txt{font-size:14px;color:var(--ink-mute);line-height:1.5;margin-bottom:16px;}
+  .confirm-box .acts{display:flex;gap:10px;}
+  .confirm-box .acts button{flex:1;}
   .pair-row:last-child{border-bottom:none;}
   .pair-de{font-size:17px;line-height:1.8;}
   .pair-ru{font-family:'Karla',sans-serif;font-size:14.5px;line-height:1.75;color:var(--ink-mute);}
@@ -632,6 +641,17 @@
     </div>
   </div>
 
+  <div class="confirm-back" id="confirmBack">
+    <div class="confirm-box">
+      <div class="ttl" id="confirmTitle"></div>
+      <div class="txt" id="confirmText"></div>
+      <div class="acts">
+        <button id="confirmYes">Да</button>
+        <button class="ghost" id="confirmNo">Нет</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ DICTIONARY ============ -->
   <div class="panel">
     <div class="dict-top">
@@ -739,6 +759,7 @@ function normalizeWord(it){
   if(typeof it.lapses !== 'number') it.lapses = 0;
   if(typeof it.justFailed !== 'boolean') it.justFailed = false;
   if(typeof it.shown  !== 'number') it.shown = 0;
+  if(typeof it.misses !== 'number') it.misses = 0;
   it.archived = !!it.archived;
   return it;
 }
@@ -916,54 +937,66 @@ async function probeStorage(){
   }catch(e){ return false; }
 }
 
+const API_BASE = "https://ugifsktajnlnsprmvlvl.supabase.co/functions/v1/";
+
+async function api(action, extra){
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const res = await fetch(API_BASE + 'words', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ initData: tg ? tg.initData : '', action }, extra || {}))
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
 async function loadDict(){
-  let got = null;
+  try{ const m = localStorage.getItem('wortik_meta'); if(m) meta = JSON.parse(m); }catch(e){}
+
   try{
-    if(typeof window.storage === 'undefined') throw new Error('нет window.storage');
-    const r = await withTimeout(window.storage.get('dictionary', false), 6000);
-    const parsed = r ? JSON.parse(r.value) : null;
-    if(parsed && !Array.isArray(parsed) && Array.isArray(parsed.words)){
-      got = parsed.words;
-      meta = parsed.meta || { lastTick: 0 };
-    } else got = parsed;
-  }catch(e){ got = null; }
-
-  dict = Array.isArray(got) ? got : [];
-  dict.forEach(normalizeWord);
-  tickDays();
-  applyRollbacks();
-
-  if(got !== null){
+    const r = await api('list');
+    dict = (r.words || []).map(w => normalizeWord({
+      id: w.id, word: w.word, trans: w.trans,
+      r: w.r, n: w.n, lapses: w.lapses, justFailed: w.justFailed,
+      shown: w.shown, archived: w.archived, misses: w.misses
+    }));
     storageOK = true;
     setStorageStatus('', '');
-  } else {
-    // ключа могло просто не быть — проверяем хранилище напрямую
-    storageOK = await probeStorage();
-    if(storageOK) setStorageStatus('', '');
-    else setStorageStatus('bad','сохранение недоступно — словарь пропадёт при перезагрузке. Хранилище работает только у опубликованного артефакта, открытого по своей ссылке.');
+  }catch(e){
+    dict = [];
+    storageOK = false;
+    setStorageStatus('bad', 'словарь не загрузился: ' + e.message);
   }
-  // migrate older entries
-  dict = dict.map(it => ({
-    id: it.id || newId(),
-    word: it.word,
-    trans: it.trans,
-    shown: typeof it.shown === 'number' ? it.shown : 0,
-    archived: !!it.archived
-  }));
+
+  tickDays();
+  applyRollbacks();
+  try{ localStorage.setItem('wortik_meta', JSON.stringify(meta)); }catch(e){}
+
   renderGrid();
   updateDensDesc();
+  if(storageOK) saveDict();
 }
-async function saveDict(){
-  try{
-    if(typeof window.storage === 'undefined') throw new Error('нет window.storage');
-    const payload = JSON.stringify({ words: dict, meta });
-    await withTimeout(window.storage.set('dictionary', payload, false), 6000);
-    if(storageOK !== true){ storageOK = true; setStorageStatus('', ''); }
-  }catch(e){
-    console.error('storage error', e);
-    storageOK = false;
-    setStorageStatus('bad','не сохранилось — словарь есть только в этой вкладке.');
-  }
+
+// состояние повторений отправляем пачкой, с небольшой задержкой:
+// за один ход оно меняется несколько раз подряд
+let saveTimer = null;
+function saveDict(){
+  if(!storageOK) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try{
+      await api('sync', { words: dict.map(it => ({
+        id: it.id, r: it.r, n: it.n, lapses: it.lapses,
+        justFailed: it.justFailed, shown: it.shown, archived: it.archived,
+        misses: it.misses
+      })) });
+      try{ localStorage.setItem('wortik_meta', JSON.stringify(meta)); }catch(e){}
+    }catch(e){
+      console.error('sync error', e);
+      setStorageStatus('bad', 'не сохранилось: ' + e.message);
+    }
+  }, 800);
 }
 
 function activeWords(){ return dict.filter(it => !it.archived); }
@@ -997,12 +1030,18 @@ function renderGrid(){
         <div class="de">${escapeHtml(it.word)}</div>
         <div class="ru">${escapeHtml(it.trans)}</div>
         <div class="card-acts">
+          ${it.r >= 6 || it.archived ? '' : `<button data-act="know" data-id="${it.id}">Я знаю</button>`}
           <button data-act="arch" data-id="${it.id}">${it.archived?'Вернуть':'В архив'}</button>
           <button class="del" data-act="del" data-id="${it.id}">Удалить</button>
         </div>
       </div>`; }).join('');
     grid.querySelectorAll('button[data-act]').forEach(b => {
-      b.onclick = () => b.dataset.act === 'del' ? deleteWord(b.dataset.id) : toggleArchive(b.dataset.id);
+      b.onclick = () => {
+        const wid = Number(b.dataset.id);
+        if(b.dataset.act === 'del') deleteWord(wid);
+        else if(b.dataset.act === 'know') askKnow(wid);
+        else toggleArchive(wid);
+      };
     });
   }
 
@@ -1016,22 +1055,83 @@ function renderGrid(){
 }
 
 async function deleteWord(id){
+  const keep = dict;
   dict = dict.filter(it => it.id !== id);
-  renderGrid(); updateDensDesc(); saveDict();
+  renderGrid(); updateDensDesc();
+  try{
+    await api('delete', { id });
+  }catch(e){
+    dict = keep; renderGrid(); updateDensDesc();
+    setStorageStatus('bad', 'не удалилось: ' + e.message);
+  }
 }
+
+// «Я знаю»: окно с выбором Да / Нет
+function askKnow(id){
+  const it = dict.find(x => x.id === id);
+  if(!it) return;
+  const back = document.getElementById('confirmBack');
+  document.getElementById('confirmTitle').textContent = 'Перенести «' + it.word + '»?';
+  document.getElementById('confirmText').textContent =
+    'Слово уедет на шестой уровень — дальше будет попадаться примерно раз в 75 дней. ' +
+    'Если ошибёшься и кликнешь по нему в тексте, оно вернётся ниже.';
+  back.classList.add('show');
+
+  const yes = document.getElementById('confirmYes');
+  const no  = document.getElementById('confirmNo');
+  const close = () => {
+    back.classList.remove('show');
+    yes.onclick = null; no.onclick = null; back.onclick = null;
+  };
+  yes.onclick = () => { close(); markKnown(id); };
+  no.onclick  = close;
+  back.onclick = (e) => { if(e.target === back) close(); };
+}
+
+async function markKnown(id){
+  const it = dict.find(x => x.id === id);
+  if(!it) return;
+  const before = { r: it.r, n: it.n, misses: it.misses, justFailed: it.justFailed };
+  it.r = 6; it.n = 0; it.misses = 0; it.justFailed = false;
+  renderGrid(); updateDensDesc();
+  try{
+    await api('know', { id });
+  }catch(e){
+    Object.assign(it, { r: before.r, n: before.n, misses: before.misses, justFailed: before.justFailed });
+    renderGrid(); updateDensDesc();
+    setStorageStatus('bad', 'не сохранилось: ' + e.message);
+  }
+}
+
 async function toggleArchive(id){
   const it = dict.find(x => x.id === id);
   if(!it) return;
   it.archived = !it.archived;
-  renderGrid(); updateDensDesc(); saveDict();
+  renderGrid(); updateDensDesc();
+  try{
+    await api('archive', { id, archived: it.archived });
+  }catch(e){
+    it.archived = !it.archived; renderGrid(); updateDensDesc();
+    setStorageStatus('bad', 'не сохранилось: ' + e.message);
+  }
 }
+
 async function addWord(word, trans){
   word = String(word||'').trim(); trans = String(trans||'').trim();
   if(!word || !trans) return false;
   if(dict.some(it => it.word.toLowerCase() === word.toLowerCase())) return false;
-  dict.push(normalizeWord({ id:newId(), word, trans, shown:0, archived:false }));
-  renderGrid(); updateDensDesc(); saveDict();
-  return true;
+  try{
+    const r = await api('add', { word, translation: trans });
+    dict.push(normalizeWord({
+      id: r.word.id, word: r.word.word, trans: r.word.trans,
+      shown: 0, archived: false
+    }));
+    renderGrid(); updateDensDesc();
+    return true;
+  }catch(e){
+    setStorageStatus('bad', e.message === 'duplicate' ? 'такое слово уже есть' : ('не добавилось: ' + e.message));
+    return false;
+  }
 }
 
 
@@ -1728,7 +1828,6 @@ document.getElementById('roundDone').onclick = finishRound;
 })();
 
 applyTransLock();
-loadDict();
 
 /* ================== АВТОРИЗАЦИЯ ЧЕРЕЗ СЕРВЕР ================== */
 const AUTH_URL = "https://ugifsktajnlnsprmvlvl.supabase.co/functions/v1/auth";
@@ -1768,6 +1867,7 @@ function authBanner(text, bad){
     }
     window.WORTIK_USER = data.user;
     console.log('auth ok', data);
+    await loadDict();
     authBanner((data.created ? 'Создан профиль' : 'С возвращением') +
       ', ' + (data.user.first_name || 'друг') + ' — id ' + data.user.id, false);
   }catch(err){
