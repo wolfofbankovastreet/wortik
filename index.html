@@ -227,6 +227,8 @@
   .w.target{background:var(--amber-bg);border-bottom:2px solid var(--amber-line);font-weight:600;}
   .w.picked{background:rgba(84,116,143,.2);}
   .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:10px 0;border-bottom:1px solid rgba(230,233,220,.9);}
+  #pvTrans[contenteditable="true"]{outline:1px dashed var(--accent);border-radius:6px;padding:2px 6px;min-width:80px;display:inline-block;}
+  #pvTrans[contenteditable="true"]:empty:before{content:attr(data-placeholder);color:var(--ink-mute);}
   .confirm-back{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.45);
     align-items:center;justify-content:center;padding:20px;}
   .confirm-back.show{display:flex;}
@@ -685,6 +687,7 @@
           <div class="sugg" id="sugg" style="display:none;"></div>
         </div>
         <button id="manAdd">Найти</button>
+        <button class="ghost" id="manSelf" title="вписать перевод самому">Сам</button>
       </div>
       <div class="add-note" id="manNote"></div>
       <div class="preview" id="preview" style="display:none;">
@@ -864,36 +867,45 @@ function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt
 function plural(n,a,b,c){ const m10=n%10,m100=n%100; if(m10===1&&m100!==11)return a; if(m10>=2&&m10<=4&&(m100<12||m100>14))return b; return c; }
 function newId(){ return Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7); }
 
-async function callClaude(payload, attempt){
+async function callClaude(payload, kind, attempt){
   attempt = attempt || 1;
+  const tg = window.Telegram && window.Telegram.WebApp;
   let res;
   try{
-    res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
+    res = await fetch(API_BASE + 'generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        initData: tg ? tg.initData : '',
+        kind: kind || 'other',
+        payload: { max_tokens: payload.max_tokens, system: payload.system, messages: payload.messages }
+      })
     });
   }catch(err){
-    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, attempt+1); }
+    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, kind, attempt+1); }
     throw new Error('нет связи с сервером');
   }
+
   const bodyText = await res.text();
+
   if(!res.ok){
     if((res.status===429 || res.status>=500) && attempt < 3){
-      await new Promise(r=>setTimeout(r,1600)); return callClaude(payload, attempt+1);
+      await new Promise(r=>setTimeout(r,1600)); return callClaude(payload, kind, attempt+1);
     }
-    if(res.status===429) throw new Error('слишком много запросов подряд — подожди немного');
     let msg = 'ошибка сервера '+res.status;
-    try{ const j=JSON.parse(bodyText); if(j.error&&j.error.message) msg += ': '+j.error.message; }catch(_){}
+    try{ const j=JSON.parse(bodyText); if(j.error) msg = j.error; }catch(_){}
     throw new Error(msg);
   }
+
   let data;
   try{ data = JSON.parse(bodyText); }
   catch(_){
-    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, attempt+1); }
+    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, kind, attempt+1); }
     throw new Error('сервер вернул некорректный ответ — попробуй ещё раз');
   }
-  if(data.error) throw new Error(data.error.message || 'ошибка API');
-  if(!data.content) throw new Error('пустой ответ от модели');
-  return data.content.map(b=>b.text||'').join('').trim();
+  if(data.error) throw new Error(data.error);
+  if(!data.text) throw new Error('пустой ответ от модели');
+  return data.text;
 }
 
 function parseJsonLoose(raw){
@@ -1152,6 +1164,9 @@ let suggTimer = null, suggSeq = 0, pvData = null;
 
 function hideSugg(){ document.getElementById('sugg').style.display = 'none'; }
 function showPreview(word, trans){
+  const t0 = document.getElementById('pvTrans');
+  t0.contentEditable = 'false';
+  t0.removeAttribute('data-placeholder');
   pvData = { word, trans };
   document.getElementById('pvWord').textContent = word;
   document.getElementById('pvTrans').textContent = trans;
@@ -1166,12 +1181,12 @@ async function fetchSuggestions(prefix, seq){
   box.style.display = 'block';
   try{
     const out = await callClaude({
-      model:"claude-sonnet-4-6", max_tokens:400,
+ max_tokens:400,
       system:`Тебе дают начало немецкого слова (возможно с опечаткой). Верни СТРОГО валидный JSON без markdown — до 6 самых частотных немецких слов, которые так начинаются или похожи по написанию:
 {"items":[{"word":"словарная форма","translation":"краткий перевод на русский"}]}
 Существительные с артиклем der/die/das, глаголы в инфинитиве (отделяемые слитно). Сортируй по частотности употребления. Если ничего похожего нет — {"items":[]}.`,
       messages:[{ role:"user", content: prefix }]
-    });
+    }, "suggest");
     if(seq !== suggSeq) return;
     const p = parseJsonLoose(out);
     const items = (p.items||[]).filter(i => i && i.word && i.translation).slice(0,6);
@@ -1218,14 +1233,14 @@ document.getElementById('manAdd').onclick = async () => {
   note.textContent = 'ищу слово…';
   try{
     const out = await callClaude({
-      model:"claude-sonnet-4-6", max_tokens:200,
+ max_tokens:200,
       system:`Тебе дают немецкое слово, возможно с опечаткой, без артикля или в склонённой форме. Верни СТРОГО валидный JSON без markdown:
 {"word":"...","translation":"..."}
 - word: правильная словарная форма. Существительное — с артиклем der/die/das в единственном числе. Глагол — инфинитив (отделяемые слитно). Прилагательное — начальная форма.
 - translation: краткий перевод на русский, 1-4 слова, самое частотное значение.
 Если ввод не похож на немецкое слово — {"word":"","translation":""}.`,
       messages:[{ role:"user", content: raw }]
-    });
+    }, "word_lookup");
     const p = parseJsonLoose(out);
     if(!p.word || !p.translation) note.textContent = 'не удалось распознать слово';
     else { note.textContent = ''; showPreview(p.word, p.translation); }
@@ -1233,9 +1248,24 @@ document.getElementById('manAdd').onclick = async () => {
   btn.disabled = false;
 };
 
+// запасной путь: перевод вписывается руками, если модель недоступна
+document.getElementById('manSelf').onclick = () => {
+  const raw = document.getElementById('manWord').value.trim();
+  if(!raw){ document.getElementById('manNote').textContent = 'сначала впиши слово'; return; }
+  suggSeq++; hideSugg();
+  showPreview(raw, '');
+  const t = document.getElementById('pvTrans');
+  t.contentEditable = 'true';
+  t.dataset.placeholder = 'впиши перевод';
+  t.focus();
+  document.getElementById('manNote').textContent = 'впиши перевод в поле и нажми «Добавить в словарь»';
+};
+
 document.getElementById('pvAdd').onclick = async () => {
   if(!pvData) return;
-  const ok = await addWord(pvData.word, pvData.trans);
+  const typed = document.getElementById('pvTrans').textContent.trim();
+  if(!typed){ document.getElementById('manNote').textContent = 'перевод не может быть пустым'; return; }
+  const ok = await addWord(pvData.word, typed);
   document.getElementById('manNote').textContent = ok ? '' : 'это слово уже есть в словаре';
   if(ok){ document.getElementById('manWord').value = ''; }
   hidePreview();
@@ -1541,10 +1571,10 @@ async function translateSentences(sents){
       if(i >= chunks.length) return;
       if(i >= CONCURRENCY) await new Promise(r => setTimeout(r, 400));
       const out = await callClaude({
-        model:"claude-sonnet-4-6", max_tokens:2000,
+ max_tokens:2000,
         system:`Ты переводишь немецкий текст на русский и размечаешь соответствия слов.\n${PAIRS_SPEC}`,
         messages:[{ role:"user", content: chunks[i].join(' ') }]
-      });
+      }, "translate_text");
       const p = parseJsonLoose(out);
       results[i] = (p.sentences||[]).filter(x => x && x.de && x.ru);
     }
@@ -1628,10 +1658,10 @@ async function runGeneration(opts){
     }
 
     let out = await callClaude({
-      model:"claude-sonnet-4-6",
+
       max_tokens: currentLen === 'XL' ? 2500 : 1500,
       system, messages:[{ role:"user", content:user }]
-    });
+    }, "generate_" + (opts.mode || currentMode || "topic"));
     if(!out) throw new Error('модель вернула пустой текст');
 
     if(expectTopicLine){
@@ -1767,14 +1797,14 @@ async function openPopup(el){
   document.getElementById('popup').classList.add('show');
   try{
     const out = await callClaude({
-      model:"claude-sonnet-4-6", max_tokens:300,
+ max_tokens:300,
       system:`Тебе дают немецкое предложение и одно слово из него. Верни СТРОГО валидный JSON без markdown:
 {"lemma":"...","translation":"...","separable_prefix":"..."}
 - lemma: словарная форма именно в том значении и той части речи, как слово употреблено здесь. Глагол — инфинитив; если это отделяемый глагол и приставка стоит в этом же предложении отдельно — верни полный инфинитив слитно (vorbereiten), а приставку в separable_prefix точно как в предложении. Существительное — с артиклем der/die/das в единственном числе.
 - translation: русский перевод, подходящий ИМЕННО к этому контексту и этой части речи, 1-4 слова.
 - separable_prefix: приставка или "" если неприменимо.`,
       messages:[{ role:"user", content:`Предложение: "${pendingCtx}"\nСлово: "${pendingWord}"` }]
-    });
+    }, "word_in_text");
     const p = parseJsonLoose(out);
     if(p.lemma) pendingWord = p.lemma;
     document.getElementById('popupWord').textContent = pendingWord;
