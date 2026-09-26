@@ -226,6 +226,22 @@
   }
   .w.target{background:var(--amber-bg);border-bottom:2px solid var(--amber-line);font-weight:600;}
   .w.picked{background:rgba(84,116,143,.2);}
+  /* перевод: две колонки, немецкий слева, русский справа.
+     Каждая колонка — цельный текст, немецкий ничем не разрывается. */
+  .pane{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start;}
+  .pane-de{font-size:17px;line-height:1.8;}
+  .pane-ru{
+    font-family:'Karla',sans-serif;font-size:15px;line-height:1.8;color:var(--ink-mute);
+    padding-left:24px;border-left:1px solid var(--line);
+  }
+  .pane-de p, .pane-ru p{margin:0 0 10px;}
+  .pane-de p:last-child, .pane-ru p:last-child{margin-bottom:0;}
+  @media (max-width:760px){
+    /* на узком экране колонки не помещаются — перевод уходит вниз целым текстом */
+    .pane{grid-template-columns:1fr;gap:18px;}
+    .pane-ru{padding-left:0;padding-top:16px;border-left:none;border-top:1px solid var(--line);}
+  }
+
   .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:10px 0;border-bottom:1px solid rgba(230,233,220,.9);}
   .confirm-back{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.45);
     align-items:center;justify-content:center;padding:20px;}
@@ -325,7 +341,10 @@
   }
   #ioText:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(78,112,82,.14);}
   .store-status{font-size:12px;line-height:1.55;margin:2px 0 10px;padding:0;color:var(--ink-mute);}
-  .store-status.ok{color:var(--accent);}
+  .store-status.ok{
+    background:var(--accent-tint);color:#42603F;
+    border-radius:10px;padding:10px 12px;margin:2px 0 12px;
+  }
   .store-status.bad{background:#FDF3F2;border:1px solid #EBD3D0;color:#8A4A44;border-radius:10px;padding:10px 12px;}
   .store-status:empty{display:none;}
 
@@ -470,6 +489,7 @@
 
   /* зелёный текст на белом — отдельный, более тёмный оттенок */
   .store-status.ok{color:var(--accent-text);}
+  body:not(.force-light) .store-status.ok{background:rgba(87,184,92,.14);color:#BCE3BE;}
   .w.saved{color:var(--accent-text);}
   .round-info{color:var(--accent-text);}
   .dict-lock{color:var(--accent-text);}
@@ -1465,9 +1485,12 @@ function paintSheet(){
   const sheet = document.getElementById('textSheet');
   let html = '';
   if(translation){
+    let de = '', ru = '';
     translation.forEach((p, i) => {
-      html += `<div class="pair-row"><div class="pair-de">${buildDeSpans(p.de, i)}</div><div class="pair-ru">${buildRuSpans(p.ru, i)}</div></div>`;
+      de += `<p>${buildDeSpans(p.de, i)}</p>`;
+      ru += `<p>${buildRuSpans(p.ru, i)}</p>`;
     });
+    html += `<div class="pane"><div class="pane-de">${de}</div><div class="pane-ru">${ru}</div></div>`;
   } else {
     sentences.forEach((s, i) => { html += buildDeSpans(s, i); });
   }
@@ -1782,7 +1805,7 @@ async function openPopup(el){
       system:`Тебе дают немецкое предложение и одно слово из него. Верни СТРОГО валидный JSON без markdown:
 {"lemma":"...","translation":"...","separable_prefix":"..."}
 - lemma: словарная форма именно в том значении и той части речи, как слово употреблено здесь. Глагол — инфинитив; если это отделяемый глагол и приставка стоит в этом же предложении отдельно — верни полный инфинитив слитно (vorbereiten), а приставку в separable_prefix точно как в предложении. Существительное — с артиклем der/die/das в единственном числе.
-- translation: русский перевод, подходящий ИМЕННО к этому контексту и этой части речи, 1-4 слова.
+- translation: русский перевод СЛОВАРНОЙ ФОРМЫ (lemma), а не формы из предложения. Существительное переводи единственным числом, глагол — инфинитивом. Значение выбирай по контексту предложения, но форму перевода давай словарную. Пример: в тексте "Jahren" → lemma "das Jahr", translation "год" (не "годы"). 1-4 слова.
 - separable_prefix: приставка или "" если неприменимо.`,
       messages:[{ role:"user", content:`Предложение: "${pendingCtx}"\nСлово: "${pendingWord}"` }]
     }, "word_in_text");
