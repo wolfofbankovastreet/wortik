@@ -227,8 +227,6 @@
   .w.target{background:var(--amber-bg);border-bottom:2px solid var(--amber-line);font-weight:600;}
   .w.picked{background:rgba(84,116,143,.2);}
   .pair-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:10px 0;border-bottom:1px solid rgba(230,233,220,.9);}
-  #pvTrans[contenteditable="true"]{outline:1px dashed var(--accent);border-radius:6px;padding:2px 6px;min-width:80px;display:inline-block;}
-  #pvTrans[contenteditable="true"]:empty:before{content:attr(data-placeholder);color:var(--ink-mute);}
   .confirm-back{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.45);
     align-items:center;justify-content:center;padding:20px;}
   .confirm-back.show{display:flex;}
@@ -687,7 +685,6 @@
           <div class="sugg" id="sugg" style="display:none;"></div>
         </div>
         <button id="manAdd">Найти</button>
-        <button class="ghost" id="manSelf" title="вписать перевод самому">Сам</button>
       </div>
       <div class="add-note" id="manNote"></div>
       <div class="preview" id="preview" style="display:none;">
@@ -1164,9 +1161,6 @@ let suggTimer = null, suggSeq = 0, pvData = null;
 
 function hideSugg(){ document.getElementById('sugg').style.display = 'none'; }
 function showPreview(word, trans){
-  const t0 = document.getElementById('pvTrans');
-  t0.contentEditable = 'false';
-  t0.removeAttribute('data-placeholder');
   pvData = { word, trans };
   document.getElementById('pvWord').textContent = word;
   document.getElementById('pvTrans').textContent = trans;
@@ -1248,24 +1242,9 @@ document.getElementById('manAdd').onclick = async () => {
   btn.disabled = false;
 };
 
-// запасной путь: перевод вписывается руками, если модель недоступна
-document.getElementById('manSelf').onclick = () => {
-  const raw = document.getElementById('manWord').value.trim();
-  if(!raw){ document.getElementById('manNote').textContent = 'сначала впиши слово'; return; }
-  suggSeq++; hideSugg();
-  showPreview(raw, '');
-  const t = document.getElementById('pvTrans');
-  t.contentEditable = 'true';
-  t.dataset.placeholder = 'впиши перевод';
-  t.focus();
-  document.getElementById('manNote').textContent = 'впиши перевод в поле и нажми «Добавить в словарь»';
-};
-
 document.getElementById('pvAdd').onclick = async () => {
   if(!pvData) return;
-  const typed = document.getElementById('pvTrans').textContent.trim();
-  if(!typed){ document.getElementById('manNote').textContent = 'перевод не может быть пустым'; return; }
-  const ok = await addWord(pvData.word, typed);
+  const ok = await addWord(pvData.word, pvData.trans);
   document.getElementById('manNote').textContent = ok ? '' : 'это слово уже есть в словаре';
   if(ok){ document.getElementById('manWord').value = ''; }
   hidePreview();
@@ -1557,7 +1536,9 @@ function baseRules(level, lenSpec){
 
 /* ---- translation: chunked and parallel (faster + far more reliable) ---- */
 async function translateSentences(sents){
-  const CHUNK = 6;
+  // Кусок в три предложения при потолке 6000 токенов — запас шестикратный.
+  // Шесть предложений упирались в 2000 и обрывались (26.09.2026).
+  const CHUNK = 3;
   const chunks = [];
   for(let i=0;i<sents.length;i+=CHUNK) chunks.push(sents.slice(i,i+CHUNK));
 
@@ -1571,7 +1552,7 @@ async function translateSentences(sents){
       if(i >= chunks.length) return;
       if(i >= CONCURRENCY) await new Promise(r => setTimeout(r, 400));
       const out = await callClaude({
- max_tokens:2000,
+ max_tokens:6000,
         system:`Ты переводишь немецкий текст на русский и размечаешь соответствия слов.\n${PAIRS_SPEC}`,
         messages:[{ role:"user", content: chunks[i].join(' ') }]
       }, "translate_text");
