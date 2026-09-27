@@ -725,7 +725,10 @@
 /* ================== STATE ================== */
 let dict = [];                 // {id, word, trans, shown, archived}
 let sentences = [];            // current German sentences
-let translation = null;        // [{de, ru, pairs}] — currently displayed
+let translation = null;        // [{de, ru}] — currently displayed
+// соответствия слов: ключ "индекс предложения|слово" → кусок русского перевода.
+// Заполняется по клику на слово, живёт до смены текста.
+let alignCache = {};
 let transCache = null;         // last fetched translation, for the show/hide toggle
 let targetForms = [];          // lowercase surface forms of dictionary words in review text
 let currentLen = "M";
@@ -1513,26 +1516,21 @@ function clearHighlight(){ document.querySelectorAll('.rw.hl').forEach(x=>x.clas
 function highlightAligned(el){
   clearHighlight();
   if(!translation) return;
-  const sIdx = parseInt(el.dataset.sent,10);
-  const pair = translation[sIdx];
-  if(!pair || !pair.pairs) return;
-  const deWord = el.dataset.clean.toLowerCase();
-  const targets = [];
-  pair.pairs.forEach(p => {
-    const de = String(p[0]||'').toLowerCase();
-    if(de === deWord || de.split(/\s+/).includes(deWord)){
-      String(p[1]||'').split(/\s+/).forEach(rw => { const c = stripPunct(rw).toLowerCase(); if(c) targets.push(c); });
-    }
-  });
+  const sIdx = parseInt(el.dataset.sent, 10);
+  const ruMatch = alignCache[sIdx + '|' + el.dataset.clean.toLowerCase()];
+  if(!ruMatch) return;   // по этому слову ещё не кликали — соответствия нет
+  const targets = String(ruMatch).split(/\s+/)
+    .map(w => stripPunct(w).toLowerCase()).filter(Boolean);
   if(!targets.length) return;
   document.querySelectorAll(`.rw[data-sent="${sIdx}"]`).forEach(r => {
     if(targets.includes(r.dataset.clean)) r.classList.add('hl');
   });
 }
 
+
 function setText(text){
   sentences = text.match(/[^.!?]+[.!?]*/g) || [text];
-  translation = null;
+  translation = null; alignCache = {};
   paintSheet();
 }
 function setPairs(arr){
@@ -1543,11 +1541,13 @@ function setPairs(arr){
 }
 
 /* ================== PROMPT BUILDING ================== */
-const PAIRS_SPEC = `Верни СТРОГО валидный JSON без markdown:
-{"sentences":[{"de":"немецкое предложение","ru":"русский перевод","pairs":[["немецкое слово","русское соответствие"]]}]}
-- "de" — предложение ровно как в исходнике;
-- "ru" — естественный перевод, не подстрочник;
-- "pairs" — соответствия знаменательных слов внутри предложения; русская часть должна дословно встречаться в "ru"; отделяемый глагол — одна пара с обеими частями через пробел; служебные слова можно пропускать.`;
+// Перевод БЕЗ пословных пар. Пары считались раньше здесь же и занимали 80% ответа,
+// хотя пользовались ими редко. Теперь соответствие приходит вместе с переводом слова,
+// когда человек по нему кликнул (см. openPopup). Замер: 4,4 → 1,3 цента на M-текст.
+const TRANS_SPEC = `Верни СТРОГО валидный JSON без markdown:
+{"sentences":[{"de":"немецкое предложение","ru":"русский перевод"}]}
+- порядок и количество предложений в "sentences" строго как на входе;
+- "ru" — естественный русский перевод, не подстрочник.`;
 
 function baseRules(level, lenSpec){
   return `Ты — автор текстов на немецком языке для изучающих язык.
@@ -1576,7 +1576,7 @@ async function translateSentences(sents){
       if(i >= CONCURRENCY) await new Promise(r => setTimeout(r, 400));
       const out = await callClaude({
  max_tokens:6000,
-        system:`Ты переводишь немецкий текст на русский и размечаешь соответствия слов.\n${PAIRS_SPEC}`,
+        system:`Ты переводишь немецкий текст на русский.\n${TRANS_SPEC}`,
         messages:[{ role:"user", content: chunks[i].join(' ') }]
       }, "translate_text");
       const p = parseJsonLoose(out);
@@ -1619,7 +1619,7 @@ async function runGeneration(opts){
   setBusy(true);
   hideSheet();
   targetForms = [];
-  translation = null;
+  translation = null; alignCache = {};
   transCache = null;
   document.getElementById('transBtn').style.display = 'none';
   document.getElementById('outTitle').textContent = isReview ? 'Текст из словаря' : (opts.topic || 'Текст');
@@ -1797,6 +1797,8 @@ async function openPopup(el){
   document.getElementById('popupAdd').style.display = '';
   document.getElementById('popupWord').textContent = pendingWord;
   document.getElementById('popupTrans').value = '';
+  const sIdxNum = parseInt(el.dataset.sent, 10);
+  const ruSent = translation ? (translation[sIdxNum] || {}).ru : '';
   document.getElementById('popupNote').textContent = 'подбираю перевод по контексту…';
   document.getElementById('popup').classList.add('show');
   try{
@@ -1806,13 +1808,22 @@ async function openPopup(el){
 {"lemma":"...","translation":"...","separable_prefix":"..."}
 - lemma: словарная форма именно в том значении и той части речи, как слово употреблено здесь. Глагол — инфинитив; если это отделяемый глагол и приставка стоит в этом же предложении отдельно — верни полный инфинитив слитно (vorbereiten), а приставку в separable_prefix точно как в предложении. Существительное — с артиклем der/die/das в единственном числе.
 - translation: русский перевод СЛОВАРНОЙ ФОРМЫ (lemma), а не формы из предложения. Существительное переводи единственным числом, глагол — инфинитивом. Значение выбирай по контексту предложения, но форму перевода давай словарную. Пример: в тексте "Jahren" → lemma "das Jahr", translation "год" (не "годы"). 1-4 слова.
-- separable_prefix: приставка или "" если неприменимо.`,
-      messages:[{ role:"user", content:`Предложение: "${pendingCtx}"\nСлово: "${pendingWord}"` }]
+- separable_prefix: приставка или "" если неприменимо.
+- ru_match: если дан русский перевод предложения — выпиши из него ДОСЛОВНО тот кусок, который соответствует этому слову (1-3 слова, ровно как в переводе). Если перевода нет или соответствия не видно — "".`,
+      messages:[{ role:"user", content:
+        `Предложение: "${pendingCtx}"\nСлово: "${pendingWord}"` +
+        (ruSent ? `\nРусский перевод предложения: "${ruSent}"` : '')
+      }]
     }, "word_in_text");
     const p = parseJsonLoose(out);
     if(p.lemma) pendingWord = p.lemma;
     document.getElementById('popupWord').textContent = pendingWord;
     document.getElementById('popupTrans').value = p.translation || '';
+    // соответствие в переводе — запоминаем и подсвечиваем
+    if(p.ru_match){
+      alignCache[sIdxNum + '|' + el.dataset.clean.toLowerCase()] = p.ru_match;
+      highlightAligned(el);
+    }
     if(p.separable_prefix){
       const sIdx = el.dataset.sent;
       document.querySelectorAll(`.w[data-sent="${sIdx}"]`).forEach(x => {
