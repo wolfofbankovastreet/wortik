@@ -730,7 +730,6 @@ let translation = null;        // [{de, ru}] — currently displayed
 // Заполняется по клику на слово, живёт до смены текста.
 let alignCache = {};
 let transCache = null;         // last fetched translation, for the show/hide toggle
-let targetForms = [];          // lowercase surface forms of dictionary words in review text
 let currentLen = "M";
 let currentDens = 10;
 let currentMode = "topic";
@@ -739,8 +738,8 @@ let page = 0;
 let pendingWord = "", pendingCtx = "";
 const PER_PAGE = 24;
 
-let meta = { lastTick: 0 };    // служебное: когда последний раз досчитывали дни
-let round = null;              // активный раунд повторения: {ids:[], clicked:Set}
+let round = null;              // раунд повторения: {count, clicked:Set(id), marks:Map(форма→id слова)}
+let markMap = new Map();       // метки последнего текста «Из словаря»: форма в нижнем регистре → id слова
 
 const LENGTHS = {
   S:  { words_num:"70–90",   label:"S · 70–90 слов",   avg:80 },
@@ -750,13 +749,14 @@ const LENGTHS = {
 };
 
 /* ================== SRS ================== */
-// интервал: через сколько дней слово готово к показу
-const INTERVAL  = {1:1, 2:3, 3:7, 4:16, 5:35, 6:75, 7:150};
-// порог: после скольких дней без показа — откат (r-3)
-const THRESHOLD = {1:10, 2:16, 3:25, 4:50, 5:100, 6:200, 7:400};
-const MAX_LEVEL = 7;
+// Уровни, счётчик дней, откат и выбор слов считает СЕРВЕР (пункт 5 плана, 27.09.2026).
+// Здесь осталось только то, что нужно для показа: цвет плашки и доступность кнопки.
 
-// сколько слов из словаря идёт в текст: [длина][плотность] = [min, max]
+// через сколько дней слово готово — только чтобы выключить кнопку «Собрать текст»,
+// когда повторять нечего. Таблица та же, что на сервере (раздел 4 ТЗ)
+const READY_AFTER = {0:1, 1:1, 2:3, 3:7, 4:16, 5:35, 6:75, 7:150};
+
+// сколько слов из словаря идёт в текст: [длина][плотность] = [min, max] — для подписи
 const DENSITY = {
   S:  { 5:[3,5],   10:[6,9],   15:[10,13] },
   M:  { 5:[6,8],   10:[11,15], 15:[17,22] },
@@ -764,18 +764,7 @@ const DENSITY = {
   XL: { 5:[16,22], 10:[30,38], 15:[40,50] }
 };
 
-function todayStamp(){
-  const d = new Date();
-  return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
-}
-function stampToDate(s){
-  return new Date(Math.floor(s/10000), Math.floor(s/100)%100 - 1, s%100);
-}
-function daysBetween(a, b){
-  return Math.round((stampToDate(b) - stampToDate(a)) / 86400000);
-}
-
-// приводим слово к полной SRS-схеме
+// приводим слово к полной схеме
 function normalizeWord(it){
   if(typeof it.r      !== 'number') it.r = 0;
   if(typeof it.n      !== 'number') it.n = 0;
@@ -794,73 +783,19 @@ function wordStatus(it){
   return it.justFailed ? { cls:'learn', label:'учу' } : { cls:'known', label:'знаю' };
 }
 
-function isDue(it){
-  if(it.archived) return false;
-  if(it.r === 0) return true;                 // новые готовы сразу, порядок FIFO
-  return it.n >= INTERVAL[it.r];
+function isReady(it){
+  return !it.archived && it.n >= (READY_AFTER[it.r] || 1);
 }
 
-// n растёт на 1 за календарный день. В артефакте нет фонового процесса,
-// поэтому при заходе досчитываем разницу дат — результат тот же.
-function tickDays(){
-  const today = todayStamp();
-  if(!meta.lastTick){ meta.lastTick = today; return 0; }
-  const diff = daysBetween(meta.lastTick, today);
-  if(diff <= 0) return 0;
-  dict.forEach(it => { if(it.r >= 1) it.n += diff; });
-  meta.lastTick = today;
-  return diff;
+// словарная форма без артикля — чтобы «Erfahrung» в тексте совпало с «die Erfahrung»
+function bareWord(w){
+  return String(w||'').toLowerCase().trim().replace(/^(der|die|das)\s+/, '');
 }
-
-// откат за долгую паузу: ровно один проход, каскада нет
-function applyRollbacks(){
-  let count = 0;
-  dict.forEach(it => {
-    if(it.archived || it.r < 1) return;       // уровень 0 не откатывается
-    if(it.n > THRESHOLD[it.r]){
-      it.r = Math.max(1, it.r - 3);
-      it.n = 0;                               // обнуления достаточно, метки не нужны
-      count++;                                // lapses НЕ трогаем — юзер слово не видел
-    }
-  });
-  return count;
-}
-
-// отделяемые приставки — для поиска по корню
-const SEP_PREFIXES = ['an','auf','aus','ein','mit','vor','zu','ab','nach','her','hin','bei','los','weg','teil','fest','frei','statt','heim','wieder','vorbei','voran','entlang','zurueck','zurück'];
-
-function baseForm(w){
-  let s = String(w||'').toLowerCase().trim();
-  s = s.replace(/^(der|die|das)\s+/, '');
-  return s;
-}
-// корень: убираем окончание и, если есть, отделяемую приставку
-function stemOf(w){
-  let s = baseForm(w);
-  for(const p of SEP_PREFIXES){
-    if(s.length > p.length + 3 && s.startsWith(p)){ s = s.slice(p.length); break; }
-  }
-  const cut = Math.max(3, s.length - 3);
-  return s.slice(0, cut);
-}
-function formMatchesWord(form, word){
-  const f = baseForm(form), b = baseForm(word);
-  if(f === b) return true;
-  const sb = stemOf(word), sf = stemOf(form);
-  if(sb.length < 3 || sf.length < 3) return false;
-  return f.startsWith(sb) || sf === sb || b.startsWith(sf);
-}
-
-function markSuccess(it){
-  if(it.r < MAX_LEVEL) it.r += 1;
-  it.n = 0;
-  it.justFailed = false;
-}
-function markFailure(it){
-  it.r = Math.max(1, it.r - 3);
-  it.n = 0;
-  it.lapses += 1;
-  it.justFailed = true;
+// найти активное слово словаря по словарной форме (с артиклем или без)
+function findInDict(lemma){
+  const b = bareWord(lemma);
+  if(!b) return null;
+  return dict.find(it => !it.archived && bareWord(it.word) === b) || null;
 }
 
 const LEVEL_RULES = {
@@ -887,7 +822,9 @@ function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt
 function plural(n,a,b,c){ const m10=n%10,m100=n%100; if(m10===1&&m100!==11)return a; if(m10>=2&&m10<=4&&(m100<12||m100>14))return b; return c; }
 function newId(){ return Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7); }
 
-async function callClaude(payload, kind, attempt){
+// Все обращения к модели идут через функцию generate на сервере.
+// По ТЗ (раздел 19): одна попытка плюс один повтор — не больше двух обращений.
+async function postGenerate(body, attempt){
   attempt = attempt || 1;
   const tg = window.Telegram && window.Telegram.WebApp;
   let res;
@@ -895,37 +832,45 @@ async function callClaude(payload, kind, attempt){
     res = await fetch(API_BASE + 'generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        initData: tg ? tg.initData : '',
-        kind: kind || 'other',
-        payload: { max_tokens: payload.max_tokens, system: payload.system, messages: payload.messages }
-      })
+      body: JSON.stringify(Object.assign({ initData: tg ? tg.initData : '' }, body))
     });
   }catch(err){
-    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, kind, attempt+1); }
+    if(attempt < 2){ await new Promise(r=>setTimeout(r,1200)); return postGenerate(body, attempt+1); }
     throw new Error('нет связи с сервером');
   }
 
   const bodyText = await res.text();
 
   if(!res.ok){
-    if((res.status===429 || res.status>=500) && attempt < 3){
-      await new Promise(r=>setTimeout(r,1600)); return callClaude(payload, kind, attempt+1);
+    if((res.status===429 || res.status>=500) && res.status !== 504 && attempt < 2){
+      await new Promise(r=>setTimeout(r,1600)); return postGenerate(body, attempt+1);
     }
     let msg = 'ошибка сервера '+res.status;
-    try{ const j=JSON.parse(bodyText); if(j.error) msg = j.error; }catch(_){}
+    try{ const j=JSON.parse(bodyText); if(j.message) msg = j.message; else if(j.error) msg = j.error; }catch(_){}
     throw new Error(msg);
   }
 
   let data;
   try{ data = JSON.parse(bodyText); }
-  catch(_){
-    if(attempt < 3){ await new Promise(r=>setTimeout(r,1200)); return callClaude(payload, kind, attempt+1); }
-    throw new Error('сервер вернул некорректный ответ — попробуй ещё раз');
-  }
-  if(data.error) throw new Error(data.error);
+  catch(_){ throw new Error('сервер вернул некорректный ответ — попробуй ещё раз'); }
+  if(data.error) throw new Error(data.message || data.error);
+  return data;
+}
+
+async function callClaude(payload, kind){
+  const data = await postGenerate({
+    kind: kind || 'other',
+    payload: { max_tokens: payload.max_tokens, system: payload.system, messages: payload.messages }
+  });
   if(!data.text) throw new Error('пустой ответ от модели');
   return data.text;
+}
+
+// «Из словаря»: слова выбирает сервер, приложение шлёт только настройки
+async function callReview(review){
+  const data = await postGenerate({ kind: 'generate_review', review });
+  if(!data.text) throw new Error('пустой ответ от модели');
+  return data;
 }
 
 function parseJsonLoose(raw){
@@ -983,52 +928,45 @@ async function api(action, extra){
   return data;
 }
 
-async function loadDict(){
-  try{ const m = localStorage.getItem('wortik_meta'); if(m) meta = JSON.parse(m); }catch(e){}
+function applyWords(list){
+  dict = (list || []).map(w => normalizeWord({
+    id: w.id, word: w.word, trans: w.trans,
+    r: w.r, n: w.n, lapses: w.lapses, justFailed: w.justFailed,
+    shown: w.shown, archived: w.archived, misses: w.misses
+  }));
+}
 
+// Заход в приложение: сервер закрывает брошенный раунд и отдаёт словарь.
+// Счётчик дней и откат считает сервер (робот раз в час) — здесь ничего не считаем.
+async function loadDict(){
   try{
-    const r = await api('list');
-    dict = (r.words || []).map(w => normalizeWord({
-      id: w.id, word: w.word, trans: w.trans,
-      r: w.r, n: w.n, lapses: w.lapses, justFailed: w.justFailed,
-      shown: w.shown, archived: w.archived, misses: w.misses
-    }));
+    const r = await api('start');
+    applyWords(r.words);
     storageOK = true;
     setStorageStatus('', '');
+    const c = r.closed_round;
+    if(c && c.closed && c.confirmed){
+      setStorageStatus('ok', `прошлый раунд закрыт — вспомнил: ${c.ok}, забыл: ${c.forgot}`);
+    }
   }catch(e){
     dict = [];
     storageOK = false;
     setStorageStatus('bad', 'словарь не загрузился: ' + e.message);
   }
-
-  tickDays();
-  applyRollbacks();
-  try{ localStorage.setItem('wortik_meta', JSON.stringify(meta)); }catch(e){}
-
   renderGrid();
   updateDensDesc();
-  if(storageOK) saveDict();
 }
 
-// состояние повторений отправляем пачкой, с небольшой задержкой:
-// за один ход оно меняется несколько раз подряд
-let saveTimer = null;
-function saveDict(){
-  if(!storageOK) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    try{
-      await api('sync', { words: dict.map(it => ({
-        id: it.id, r: it.r, n: it.n, lapses: it.lapses,
-        justFailed: it.justFailed, shown: it.shown, archived: it.archived,
-        misses: it.misses
-      })) });
-      try{ localStorage.setItem('wortik_meta', JSON.stringify(meta)); }catch(e){}
-    }catch(e){
-      console.error('sync error', e);
-      setStorageStatus('bad', 'не сохранилось: ' + e.message);
-    }
-  }, 800);
+// перечитать словарь с сервера (после раунда уровни поменялись там)
+async function reloadDict(){
+  try{
+    const r = await api('list');
+    applyWords(r.words);
+  }catch(e){
+    setStorageStatus('bad', 'словарь не обновился: ' + e.message);
+  }
+  renderGrid();
+  updateDensDesc();
 }
 
 function activeWords(){ return dict.filter(it => !it.archived); }
@@ -1307,58 +1245,20 @@ function densityRange(){
 }
 function targetCount(){ return densityRange()[1]; }
 
-/* ---- сборка очереди: категории, FIFO, пропорция, потолок 50% ---- */
-function buildQueue(capacity){
-  // порядок в dict = порядок добавления, значит FIFO — это порядок массива как есть
-  const due = dict.filter(isDue);
-  const groupNew     = due.filter(it => it.r === 0);
-  const groupPlanned = due.filter(it => it.r >= 1 && it.lapses === 0);
-  const groupFragile = due.filter(it => it.r >= 1 && it.lapses >= 1);
-
-  const total = groupNew.length + groupPlanned.length + groupFragile.length;
-  if(total === 0) return [];
-
-  // конкуренции нет — берём всех, потолок не применяется
-  if(total <= capacity){
-    return groupNew.concat(groupPlanned, groupFragile);
-  }
-
-  // пропорционально размеру групп
-  let wantNew     = Math.round(capacity * groupNew.length / total);
-  let wantPlanned = Math.round(capacity * groupPlanned.length / total);
-  let wantFragile = Math.round(capacity * groupFragile.length / total);
-
-  // потолок 50% на новые — только при конкуренции
-  wantNew = Math.min(wantNew, Math.floor(capacity / 2));
-
-  let takeNew     = Math.min(groupNew.length, wantNew);
-  let takePlanned = Math.min(groupPlanned.length, wantPlanned);
-  let takeFragile = Math.min(groupFragile.length, wantFragile);
-
-  // округление трёх долей может дать на одно место больше — подрезаем самую большую группу
-  while(takeNew + takePlanned + takeFragile > capacity){
-    if(takeFragile >= takePlanned && takeFragile >= takeNew) takeFragile--;
-    else if(takePlanned >= takeNew) takePlanned--;
-    else takeNew--;
-  }
-
-  // добираем пустые места той группой, где ещё есть слова
-  let left = capacity - takeNew - takePlanned - takeFragile;
-  const fill = [
-    () => { const add = Math.min(left, groupPlanned.length - takePlanned); takePlanned += add; left -= add; },
-    () => { const add = Math.min(left, groupFragile.length - takeFragile); takeFragile += add; left -= add; },
-    () => { const add = Math.min(left, groupNew.length - takeNew);         takeNew     += add; left -= add; }
-  ];
-  fill.forEach(f => { if(left > 0) f(); });
-
-  return groupNew.slice(0, takeNew)
-    .concat(groupPlanned.slice(0, takePlanned), groupFragile.slice(0, takeFragile));
-}
+// Кнопка «Собрать текст» недоступна, когда собирать не из чего (раздел 8 ТЗ).
+// Сами слова выбирает сервер — здесь только проверка «есть ли вообще что повторять».
+let reviewBlocked = false;
 function updateDensDesc(){
   const el = document.getElementById('densDesc');
-  if(activeWords().length === 0){ el.textContent = 'словарь пуст — сначала добавь слова'; return; }
-  const [lo, hi] = densityRange();
-  el.textContent = `в текст пойдёт ${lo}–${hi} слов`;
+  const btn = document.getElementById('genReviewBtn');
+  const act = activeWords();
+  let msg = '', block = false;
+  if(act.length === 0){ msg = 'словарь пуст — сначала сгенерируй обычный текст и покликай по незнакомым словам'; block = true; }
+  else if(!act.some(isReady)){ msg = 'сегодня повторять нечего, слова ещё отдыхают'; block = true; }
+  else { const [lo, hi] = densityRange(); msg = `в текст пойдёт ${lo}–${hi} слов`; }
+  el.textContent = msg;
+  reviewBlocked = block;
+  btn.disabled = busy || block;
 }
 
 /* ================== MODE TABS ================== */
@@ -1466,8 +1366,8 @@ function buildDeSpans(sent, sIdx){
     // иначе юзер видит, какие именно надо вспомнить
     let cls = 'w';
     if(!round){
-      const saved = dict.some(it => it.word.toLowerCase() === low);
-      const isTarget = targetForms.includes(low);
+      const saved = dict.some(it => bareWord(it.word) === low);
+      const isTarget = markMap.has(low);
       cls += isTarget ? ' target' : (saved ? ' saved' : '');
     }
     html += `<span class="${cls}" data-key="${sIdx}-${tIdx}" data-clean="${escapeHtml(clean)}" data-sent="${sIdx}">${escapeHtml(tok)}</span>`;
@@ -1592,18 +1492,23 @@ let busy = false;
 function setBusy(v){
   busy = v;
   document.getElementById('genTopicBtn').disabled = v;
-  document.getElementById('genReviewBtn').disabled = v;
+  document.getElementById('genReviewBtn').disabled = v || reviewBlocked;
   document.getElementById('genRandomBtn').disabled = v || selectedTags.size === 0;
 }
 
-const MARK_RE = /\[\[([^\]]+)\]\]/g;
+// Метки сервера в тексте «Из словаря»: [[форма|номер слова в базе]].
+// Вырезаем их перед показом и запоминаем, какая форма — какое слово словаря.
+const MARK_RE = /\[\[([^\]|]+)\|(\d+)\]\]/g;
 function extractMarks(text){
-  const forms = [];
-  const clean = text.replace(MARK_RE, (m, inner) => {
-    inner.split(/\s+/).forEach(w => { const c = stripPunct(w).toLowerCase(); if(c) forms.push(c); });
+  const map = new Map();
+  const clean = text.replace(MARK_RE, (m, inner, id) => {
+    inner.split(/\s+/).forEach(w => {
+      const c = stripPunct(w).toLowerCase();
+      if(c && !map.has(c)) map.set(c, Number(id));
+    });
     return inner;
   });
-  return { clean, forms };
+  return { clean, map };
 }
 
 async function runGeneration(opts){
@@ -1613,12 +1518,14 @@ async function runGeneration(opts){
   const withTrans = document.getElementById('transChk').checked;
   const isReview = opts.mode === 'review';
 
-  // если предыдущий раунд не закрыт кнопкой — закрываем его, иначе результат потеряется
-  if(round) finishRound();
+  // Незакрытый раунд закрывает сервер при генерации нового текста (раздел 8 ТЗ).
+  // Здесь только убираем его с экрана, а словарь перечитаем после ответа.
+  const hadRound = !!round;
+  if(round) endRoundUI();
 
   setBusy(true);
   hideSheet();
-  targetForms = [];
+  markMap = new Map();
   translation = null; alignCache = {};
   transCache = null;
   document.getElementById('transBtn').style.display = 'none';
@@ -1626,26 +1533,20 @@ async function runGeneration(opts){
   showState('loading', isReview ? 'собираю текст из твоих слов…' : 'печатает текст…');
 
   try{
-    let picked = [], system, user, expectTopicLine = false;
+    let out, reviewRes = null, expectTopicLine = false;
 
     if(isReview){
-      const act = activeWords();
-      if(act.length === 0) throw new Error('в словаре нет активных слов');
-      picked = buildQueue(targetCount());
-      if(picked.length === 0) throw new Error('сегодня нечего повторять — все слова ещё отдыхают');
-      const list = picked.map(it => `${it.word} (${it.trans})`).join('; ');
-      system = baseRules(level, lenSpec) + `
-
-ГЛАВНАЯ ЗАДАЧА: вплети в текст ВСЕ слова из списка, каждое минимум один раз, в любой нужной грамматической форме. Не перечисляй их — текст должен быть связным.${tagsClause()}
-
-РАЗМЕТКА: каждое употребление слова из списка оберни в двойные квадратные скобки, например [[Verpackung]]. Для отделяемых глаголов пометь обе части отдельно: [[schaltete]] ... [[ein]]. Остальной текст не размечай.
-
-Пиши ТОЛЬКО текст на немецком: без перевода, без заголовка, без пояснений, без markdown.`;
-      user = `Слова: ${list}`;
-    } else if(opts.mode === 'random'){
-      const category = pickCategory();
-      expectTopicLine = true;
-      system = baseRules(level, lenSpec) + `
+      // слова, запрос к модели и раунд — всё на сервере
+      reviewRes = await callReview({
+        level, len: currentLen, dens: currentDens, tags: Array.from(selectedTags)
+      });
+      out = reviewRes.text;
+    } else {
+      let system, user;
+      if(opts.mode === 'random'){
+        const category = pickCategory();
+        expectTopicLine = true;
+        system = baseRules(level, lenSpec) + `
 
 Сначала сам придумай одну конкретную узкую тему в рамках заданной категории (2-6 слов), затем напиши по ней текст.
 Формат ответа строго такой:
@@ -1653,19 +1554,18 @@ async function runGeneration(opts){
 <пустая строка>
 <текст на немецком>
 Больше ничего не добавляй: без перевода, без пояснений, без markdown.`;
-      user = `Категория: ${category}`;
-    } else {
-      system = baseRules(level, lenSpec) + `
+        user = `Категория: ${category}`;
+      } else {
+        system = baseRules(level, lenSpec) + `
 
 Пиши ТОЛЬКО текст на немецком: без перевода, без заголовка, без пояснений, без markdown.`;
-      user = `Тема: ${opts.topic}`;
+        user = `Тема: ${opts.topic}`;
+      }
+      out = await callClaude({
+        max_tokens: currentLen === 'XL' ? 2500 : 1500,
+        system, messages:[{ role:"user", content:user }]
+      }, "generate_" + (opts.mode || currentMode || "topic"));
     }
-
-    let out = await callClaude({
-
-      max_tokens: currentLen === 'XL' ? 2500 : 1500,
-      system, messages:[{ role:"user", content:user }]
-    }, "generate_" + (opts.mode || currentMode || "topic"));
     if(!out) throw new Error('модель вернула пустой текст');
 
     if(expectTopicLine){
@@ -1681,15 +1581,15 @@ async function runGeneration(opts){
     if(isReview){
       const ex = extractMarks(out);
       out = ex.clean;
-      targetForms = ex.forms;
-      if(!targetForms.length) picked.forEach(it => targetForms.push(stripPunct(it.word).toLowerCase()));
-      picked.forEach(p => { const it = dict.find(x => x.id === p.id); if(it) it.shown = (it.shown||0) + 1; });
-      startRound(picked.map(p => p.id));
-      saveDict(); renderGrid(); updateDensDesc();
+      markMap = ex.map;
+      startRound(reviewRes.round || 0);
     }
 
     setText(out);
     showState('none','');
+
+    // текст на экране — сообщаем серверу «показал». Без этого раунд не засчитается.
+    if(isReview) confirmShown();
 
     if(withTrans){
       showState('loading','перевожу…');
@@ -1706,6 +1606,7 @@ async function runGeneration(opts){
     showState('error', String(e.message||e));
   }
   setBusy(false);
+  if(hadRound || isReview) reloadDict();
 }
 
 document.getElementById('genTopicBtn').onclick = () => {
@@ -1731,8 +1632,13 @@ document.getElementById('transBtn').onclick = () => {
 
 
 /* ================== РАУНД ПОВТОРЕНИЯ ================== */
-function startRound(ids){
-  round = { ids: ids.slice(), clicked: new Set() };
+// Уровни меняет сервер. Приложение сообщает ему три вещи:
+//   confirm — текст показан; fail — клик по слову из словаря; done — «Готово».
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const pendingFails = new Set();
+
+function startRound(count){
+  round = { count, clicked: new Set() };
   document.getElementById('dictLock').style.display = 'block';
   document.getElementById('dictBody').style.display = 'none';
   document.getElementById('roundBar').style.display = 'flex';
@@ -1740,27 +1646,62 @@ function startRound(ids){
 }
 function updateRoundBar(){
   if(!round) return;
-  const miss = round.clicked.size;
   document.getElementById('roundInfo').textContent =
-    `слов в раунде: ${round.ids.length} · подсмотрено: ${miss}`;
+    `слов в раунде: ${round.count} · подсмотрено: ${round.clicked.size}`;
 }
-function finishRound(){
-  if(!round) return;
-  let ok = 0;
-  round.ids.forEach(id => {
-    if(round.clicked.has(id)) return;   // провал уже записан в момент клика
-    const it = dict.find(x => x.id === id);
-    if(it){ markSuccess(it); ok++; }
-  });
-  const miss = round.clicked.size;
+// убрать раунд с экрана (на сервере он закрывается отдельно)
+function endRoundUI(){
   round = null;
   document.getElementById('dictLock').style.display = 'none';
   document.getElementById('dictBody').style.display = '';
   document.getElementById('roundBar').style.display = 'none';
-  renderGrid(); updateDensDesc(); saveDict();
   if(sentences.length) paintSheet();
-  setStorageStatus(storageOK === false ? 'bad' : 'ok',
-    `раунд закрыт — вспомнил: ${ok}, забыл: ${miss}`);
+}
+
+async function confirmShown(){
+  for(let i = 0; i < 2; i++){
+    try{ await api('confirm'); return; }
+    catch(e){ await sleep(1500); }
+  }
+  // не дошло — не страшно: первый клик или «Готово» подтвердят раунд сами
+}
+
+// клик по слову из словаря = «забыл». Пишется сразу, повторный клик не считается.
+function registerFail(id){
+  if(!round || round.clicked.has(id)) return;
+  round.clicked.add(id);
+  updateRoundBar();
+  const p = api('fail', { id })
+    .catch(e => setStorageStatus('bad', 'клик не записался: ' + e.message))
+    .finally(() => pendingFails.delete(p));
+  pendingFails.add(p);
+}
+
+async function finishRound(){
+  if(!round) return;
+  const btn = document.getElementById('roundDone');
+  btn.disabled = true;
+  await Promise.all([...pendingFails]);        // сначала дописываем клики
+  try{
+    const r = await api('done');
+    const c = r.closed_round || {};
+    endRoundUI();
+    setStorageStatus('ok', `раунд закрыт — вспомнил: ${c.ok || 0}, забыл: ${c.forgot || 0}`);
+  }catch(e){
+    setStorageStatus('bad', 'раунд не закрылся: ' + e.message + ' — нажми «Готово» ещё раз');
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  await reloadDict();
+}
+
+function showAlreadyInDict(word){
+  document.getElementById('popupWord').textContent = word;
+  document.getElementById('popupTrans').style.display = 'none';
+  document.getElementById('popupAdd').style.display = 'none';
+  document.getElementById('popupNote').textContent = 'это слово уже есть в твоём словаре';
+  document.getElementById('popup').classList.add('show');
 }
 
 /* ================== WORD POPUP ================== */
@@ -1770,31 +1711,20 @@ async function openPopup(el){
   pendingWord = el.dataset.clean;
   pendingCtx = (translation ? translation[parseInt(el.dataset.sent,10)].de : sentences[parseInt(el.dataset.sent,10)] || '').trim();
 
-  // В раунде повторения: слово уже в словаре → только сообщение.
-  // Перевод не даём, кнопки «Добавить» нет, провал пишем сразу.
+  // В раунде повторения слово из словаря → «забыл», перевод не даём (раздел 10 ТЗ).
+  // Слово из списка раунда узнаём по метке сервера — точно и без запроса к модели.
   if(round){
-    const low = pendingWord.toLowerCase();
-    const inRound = round.ids.map(id => dict.find(x => x.id === id)).filter(Boolean);
-    let hit = inRound.find(it => it.word.toLowerCase() === low)
-           || inRound.find(it => formMatchesWord(pendingWord, it.word))
-           || dict.find(it => !it.archived && it.word.toLowerCase() === low);
-    if(hit){
-      if(!round.clicked.has(hit.id)){
-        round.clicked.add(hit.id);
-        markFailure(hit);
-        saveDict();
-        updateRoundBar();
-      }
-      document.getElementById('popupWord').textContent = pendingWord;
-      document.getElementById('popupTrans').style.display = 'none';
-      document.getElementById('popupAdd').style.display = 'none';
-      document.getElementById('popupNote').textContent = 'это слово уже есть в твоём словаре';
-      document.getElementById('popup').classList.add('show');
+    const wid = markMap.get(pendingWord.toLowerCase());
+    if(wid && dict.some(x => x.id === wid)){
+      registerFail(wid);
+      showAlreadyInDict(pendingWord);
       return;
     }
   }
-  document.getElementById('popupTrans').style.display = '';
-  document.getElementById('popupAdd').style.display = '';
+  // пока идёт раунд, перевод и кнопку показываем только когда узнаем,
+  // что слова в словаре нет — иначе мелькнёт подсказка
+  document.getElementById('popupTrans').style.display = round ? 'none' : '';
+  document.getElementById('popupAdd').style.display = round ? 'none' : '';
   document.getElementById('popupWord').textContent = pendingWord;
   document.getElementById('popupTrans').value = '';
   const sIdxNum = parseInt(el.dataset.sent, 10);
@@ -1816,6 +1746,18 @@ async function openPopup(el){
       }]
     }, "word_in_text");
     const p = parseJsonLoose(out);
+    // Слово из словаря, которого не было в списке раунда: модель могла употребить его
+    // сама. Сравниваем словарную форму со словарём — «забыл», перевод не показываем.
+    if(round){
+      const hit = findInDict(p.lemma || pendingWord);
+      if(hit){
+        registerFail(hit.id);
+        showAlreadyInDict(p.lemma || pendingWord);
+        return;
+      }
+      document.getElementById('popupTrans').style.display = '';
+      document.getElementById('popupAdd').style.display = '';
+    }
     if(p.lemma) pendingWord = p.lemma;
     document.getElementById('popupWord').textContent = pendingWord;
     document.getElementById('popupTrans').value = p.translation || '';
@@ -1832,6 +1774,8 @@ async function openPopup(el){
       document.getElementById('popupNote').textContent = `отделяемый глагол — приставка «${p.separable_prefix}» учтена`;
     } else document.getElementById('popupNote').textContent = '';
   }catch(e){
+    document.getElementById('popupTrans').style.display = '';
+    document.getElementById('popupAdd').style.display = '';
     document.getElementById('popupNote').textContent = 'не получилось автоматически — впиши перевод сам';
   }
   document.getElementById('popupTrans').focus();
