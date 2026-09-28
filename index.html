@@ -1444,10 +1444,32 @@ function setPairs(arr){
 // Перевод БЕЗ пословных пар. Пары считались раньше здесь же и занимали 80% ответа,
 // хотя пользовались ими редко. Теперь соответствие приходит вместе с переводом слова,
 // когда человек по нему кликнул (см. openPopup). Замер: 4,4 → 1,3 цента на M-текст.
-const TRANS_SPEC = `Верни СТРОГО валидный JSON без markdown:
-{"sentences":[{"de":"немецкое предложение","ru":"русский перевод"}]}
-- порядок и количество предложений в "sentences" строго как на входе;
-- "ru" — естественный русский перевод, не подстрочник.`;
+// 28.09.2026: перевод нумерованным списком вместо JSON. Модель возвращает только русский
+// с номерами предложений — немецкий обратно не переписывает (ответ короче, дешевле),
+// и сломать формат нечем (раньше кавычки в немецком ломали JSON и роняли весь перевод).
+const TRANS_SPEC = `Тебе дают пронумерованные немецкие предложения. Переведи каждое на русский.
+Формат ответа строго такой — одна строка на предложение, с тем же номером:
+1. перевод первого предложения
+2. перевод второго предложения
+Правила:
+- строк ровно столько, сколько предложений, номера те же;
+- не объединяй и не разбивай предложения;
+- естественный русский перевод, не подстрочник;
+- без немецкого текста, без пояснений, без markdown.`;
+
+// разбор ответа «N. перевод» → {номер: перевод}. Строка без номера — продолжение предыдущей.
+function parseNumbered(out){
+  const map = {};
+  let last = null;
+  String(out || '').split(/\r?\n/).forEach(line => {
+    const t = line.trim();
+    if(!t) return;
+    const m = t.match(/^(\d+)\s*[.)]\s*(.*)$/);
+    if(m){ last = Number(m[1]); map[last] = m[2].trim(); }
+    else if(last !== null){ map[last] = (map[last] + ' ' + t).trim(); }
+  });
+  return map;
+}
 
 function baseRules(level, lenSpec){
   return `Ты — автор текстов на немецком языке для изучающих язык.
@@ -1458,14 +1480,35 @@ function baseRules(level, lenSpec){
 }
 
 /* ---- translation: chunked and parallel (faster + far more reliable) ---- */
+// Один кусок: пронумеровать → спросить → проверить, что пришли все номера.
+// Не все — спросить ещё раз. Опять не все — показать кусок одним абзацем,
+// чтобы ничего не съехало (раздел 5b ТЗ).
+async function translateChunk(chunk){
+  const content = chunk.map((sent, i) => `${i + 1}. ${sent.replace(/\s+/g, ' ').trim()}`).join('\n');
+  let map = {};
+  for(let attempt = 1; attempt <= 2; attempt++){
+    const out = await callClaude({
+      max_tokens: 6000,
+      system: `Ты переводишь немецкий текст на русский.\n${TRANS_SPEC}`,
+      messages: [{ role: "user", content }]
+    }, "translate_text");
+    map = parseNumbered(out);
+    const complete = chunk.every((_, i) => map[i + 1]);
+    if(complete) return chunk.map((de, i) => ({ de, ru: map[i + 1] }));
+  }
+  // запасной вариант: весь кусок — одна пара, перевод по порядку одним абзацем
+  const ru = Object.keys(map).map(Number).sort((a, b) => a - b).map(k => map[k]).join(' ');
+  if(!ru) throw new Error('модель не вернула перевод');
+  return [{ de: chunk.join(' '), ru }];
+}
+
 async function translateSentences(sents){
-  // Кусок в три предложения при потолке 6000 токенов — запас шестикратный.
-  // Шесть предложений упирались в 2000 и обрывались (26.09.2026).
+  // Кусок в три предложения при потолке 6000 токенов — запас с большим избытком.
   const CHUNK = 3;
   const chunks = [];
   for(let i=0;i<sents.length;i+=CHUNK) chunks.push(sents.slice(i,i+CHUNK));
 
-  // at most 2 requests in flight — more than that trips the rate limit
+  // не больше двух запросов одновременно — иначе упираемся в ограничение частоты
   const CONCURRENCY = 2;
   const results = new Array(chunks.length);
   let next = 0;
@@ -1474,13 +1517,7 @@ async function translateSentences(sents){
       const i = next++;
       if(i >= chunks.length) return;
       if(i >= CONCURRENCY) await new Promise(r => setTimeout(r, 400));
-      const out = await callClaude({
- max_tokens:6000,
-        system:`Ты переводишь немецкий текст на русский.\n${TRANS_SPEC}`,
-        messages:[{ role:"user", content: chunks[i].join(' ') }]
-      }, "translate_text");
-      const p = parseJsonLoose(out);
-      results[i] = (p.sentences||[]).filter(x => x && x.de && x.ru);
+      results[i] = await translateChunk(chunks[i]);
     }
   }
   await Promise.all(Array.from({length:Math.min(CONCURRENCY, chunks.length)}, worker));
