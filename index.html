@@ -861,9 +861,10 @@ function showQuotaWarn(pct){
   const el = document.createElement('div');
   el.className = 'quota-warn';
   el.innerHTML = '<span></span><button type="button" aria-label="закрыть">×</button>';
+  // порог значит «осталось меньше N %» — так и пишем (решено 04.10.2026)
   el.querySelector('span').textContent = pct <= 5
-    ? `Месячный объём почти закончился — осталось около ${pct}%.`
-    : `Месячный объём заканчивается — осталось около ${pct}%.`;
+    ? 'Объём на этот месяц почти закончился — осталось меньше 5%.'
+    : `В этом месяце осталось меньше ${pct}% объёма.`;
   el.querySelector('button').onclick = () => el.remove();
   document.body.appendChild(el);
 }
