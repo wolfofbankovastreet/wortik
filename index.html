@@ -347,6 +347,14 @@
   }
   .store-status.bad{background:#FDF3F2;border:1px solid #EBD3D0;color:#8A4A44;border-radius:10px;padding:10px 12px;}
   .store-status:empty{display:none;}
+  /* лимиты (пункт 8): окно «объём закончился» и строка-предупреждение 20/10/5% */
+  .quota-veil{position:fixed;inset:0;background:rgba(20,24,19,.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:1000;}
+  .quota-box{background:var(--surface);color:var(--ink);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);max-width:360px;width:100%;padding:22px 20px 18px;}
+  .quota-box h3{margin:0 0 8px;font-size:18px;}
+  .quota-box p{margin:0 0 16px;line-height:1.5;color:var(--ink-mute);}
+  .quota-box button{width:100%;padding:12px;border:0;border-radius:var(--r-md);background:var(--accent);color:var(--accent-ink);font-weight:600;font-size:15px;cursor:pointer;}
+  .quota-warn{position:fixed;left:12px;right:12px;top:12px;z-index:999;background:var(--amber-bg);border:1px solid var(--amber-line);color:#6B5418;border-radius:var(--r-md);padding:12px 40px 12px 14px;font-size:14px;line-height:1.45;box-shadow:var(--shadow-md);}
+  .quota-warn button{position:absolute;right:8px;top:8px;border:0;background:transparent;font-size:18px;line-height:1;color:inherit;cursor:pointer;padding:4px 6px;}
 
   .sugg{
     position:absolute;top:46px;left:0;right:0;z-index:20;
@@ -824,6 +832,42 @@ function newId(){ return Date.now().toString(36)+'_'+Math.random().toString(36).
 
 // Все обращения к модели идут через функцию generate на сервере.
 // По ТЗ (раздел 19): одна попытка плюс один повтор — не больше двух обращений.
+/* ================== ЛИМИТЫ (пункт 8) ================== */
+// Окно «объём закончился». Перевод может слать несколько запросов подряд —
+// окно одно, повторно не открываем, пока оно на экране.
+const QUOTA_TITLES = {
+  no_plan: 'Нужна подписка',
+  trial_over: 'Пробный период закончился',
+  empty: 'Объём закончился',
+  expired: 'Подписка закончилась'
+};
+let quotaShownAt = 0;
+function showQuota(reason, msg){
+  // подсказки при вводе слова шлют запрос на каждую букву — окно не чаще раза в 15 с
+  if(document.querySelector('.quota-veil') || Date.now() - quotaShownAt < 15000) return;
+  quotaShownAt = Date.now();
+  const veil = document.createElement('div');
+  veil.className = 'quota-veil';
+  veil.innerHTML = '<div class="quota-box"><h3></h3><p></p><button type="button">Понятно</button></div>';
+  veil.querySelector('h3').textContent = QUOTA_TITLES[reason] || QUOTA_TITLES.empty;
+  veil.querySelector('p').textContent = msg;
+  veil.querySelector('button').onclick = () => veil.remove();
+  veil.onclick = e => { if(e.target === veil) veil.remove(); };
+  document.body.appendChild(veil);
+}
+// Строка «осталось 20 / 10 / 5 %». Сервер присылает порог один раз — показываем как есть.
+function showQuotaWarn(pct){
+  document.querySelectorAll('.quota-warn').forEach(x => x.remove());
+  const el = document.createElement('div');
+  el.className = 'quota-warn';
+  el.innerHTML = '<span></span><button type="button" aria-label="закрыть">×</button>';
+  el.querySelector('span').textContent = pct <= 5
+    ? `Месячный объём почти закончился — осталось около ${pct}%.`
+    : `Месячный объём заканчивается — осталось около ${pct}%.`;
+  el.querySelector('button').onclick = () => el.remove();
+  document.body.appendChild(el);
+}
+
 async function postGenerate(body, attempt){
   attempt = attempt || 1;
   const tg = window.Telegram && window.Telegram.WebApp;
@@ -846,7 +890,10 @@ async function postGenerate(body, attempt){
       await new Promise(r=>setTimeout(r,1600)); return postGenerate(body, attempt+1);
     }
     let msg = 'ошибка сервера '+res.status;
-    try{ const j=JSON.parse(bodyText); if(j.message) msg = j.message; else if(j.error) msg = j.error; }catch(_){}
+    let j = null;
+    try{ j=JSON.parse(bodyText); if(j.message) msg = j.message; else if(j.error) msg = j.error; }catch(_){}
+    // объёма нет (пункт 8): модель не вызывалась — показываем окно один раз на запрос
+    if(res.status === 402 && j && j.error === 'quota') showQuota(j.reason, msg);
     throw new Error(msg);
   }
 
@@ -854,6 +901,7 @@ async function postGenerate(body, attempt){
   try{ data = JSON.parse(bodyText); }
   catch(_){ throw new Error('сервер вернул некорректный ответ — попробуй ещё раз'); }
   if(data.error) throw new Error(data.message || data.error);
+  if(data.warn) showQuotaWarn(data.warn);
   return data;
 }
 
@@ -1560,6 +1608,7 @@ async function runGeneration(opts){
   // Здесь только убираем его с экрана, а словарь перечитаем после ответа.
   const hadRound = !!round;
   if(round) endRoundUI();
+  let failed = false;
 
   setBusy(true);
   hideSheet();
@@ -1642,9 +1691,13 @@ async function runGeneration(opts){
   }catch(e){
     hideSheet();
     showState('error', String(e.message||e));
+    failed = true;
   }
   setBusy(false);
-  if(hadRound || isReview) reloadDict();
+  // Новый текст не получился (например, кончился объём) — сервер старый раунд
+  // не закрывал. Возвращаем его на экран тем же путём, что при заходе.
+  if(failed && hadRound) loadDict();
+  else if(hadRound || isReview) reloadDict();
 }
 
 document.getElementById('genTopicBtn').onclick = () => {
