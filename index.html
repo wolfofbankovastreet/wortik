@@ -738,7 +738,7 @@ let page = 0;
 let pendingWord = "", pendingCtx = "";
 const PER_PAGE = 24;
 
-let round = null;              // раунд повторения: {count, clicked:Set(id), marks:Map(форма→id слова)}
+let round = null;              // раунд повторения: {count, clicked:Set(id), key — номер раунда на сервере}
 let markMap = new Map();       // метки последнего текста «Из словаря»: форма в нижнем регистре → id слова
 
 const LENGTHS = {
@@ -936,7 +936,7 @@ function applyWords(list){
   }));
 }
 
-// Заход в приложение: сервер закрывает брошенный раунд и отдаёт словарь.
+// Заход в приложение: сервер отдаёт словарь и незаконченный текст «Из словаря», если он есть.
 // Счётчик дней и откат считает сервер (робот раз в час) — здесь ничего не считаем.
 async function loadDict(){
   try{
@@ -948,6 +948,7 @@ async function loadDict(){
     if(c && c.closed && c.confirmed){
       setStorageStatus('ok', `прошлый раунд закрыт — вспомнил: ${c.ok}, забыл: ${c.forgot}`);
     }
+    if(r.open_round && r.open_round.text) restoreRound(r.open_round);
   }catch(e){
     dict = [];
     storageOK = false;
@@ -1619,7 +1620,7 @@ async function runGeneration(opts){
       const ex = extractMarks(out);
       out = ex.clean;
       markMap = ex.map;
-      startRound(reviewRes.round || 0);
+      startRound(reviewRes.round || 0, reviewRes.round_key);
     }
 
     setText(out);
@@ -1674,8 +1675,8 @@ document.getElementById('transBtn').onclick = () => {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const pendingFails = new Set();
 
-function startRound(count){
-  round = { count, clicked: new Set() };
+function startRound(count, key, clicked){
+  round = { count, key: key || null, clicked: new Set((clicked || []).map(Number)) };
   document.getElementById('dictLock').style.display = 'block';
   document.getElementById('dictBody').style.display = 'none';
   document.getElementById('roundBar').style.display = 'flex';
@@ -1696,8 +1697,13 @@ function endRoundUI(){
 }
 
 async function confirmShown(){
+  const key = round && round.key;
   for(let i = 0; i < 2; i++){
-    try{ await api('confirm'); return; }
+    try{
+      const r = await api('confirm', { key });
+      if(r.stale) roundClosedElsewhere(key);
+      return;
+    }
     catch(e){ await sleep(1500); }
   }
   // не дошло — не страшно: первый клик или «Готово» подтвердят раунд сами
@@ -1708,7 +1714,9 @@ function registerFail(id){
   if(!round || round.clicked.has(id)) return;
   round.clicked.add(id);
   updateRoundBar();
-  const p = api('fail', { id })
+  const key = round.key;
+  const p = api('fail', { id, key })
+    .then(r => { if(r && r.stale) roundClosedElsewhere(key); })
     .catch(e => setStorageStatus('bad', 'клик не записался: ' + e.message))
     .finally(() => pendingFails.delete(p));
   pendingFails.add(p);
@@ -1719,8 +1727,11 @@ async function finishRound(){
   const btn = document.getElementById('roundDone');
   btn.disabled = true;
   await Promise.all([...pendingFails]);        // сначала дописываем клики
+  if(!round){ btn.disabled = false; return; }  // пока ждали, выяснилось: текст уже закрыт
   try{
-    const r = await api('done');
+    const key = round.key;
+    const r = await api('done', { key });
+    if(r.stale){ btn.disabled = false; roundClosedElsewhere(key); return; }
     const c = r.closed_round || {};
     endRoundUI();
     setStorageStatus('ok', `раунд закрыт — вспомнил: ${c.ok || 0}, забыл: ${c.forgot || 0}`);
@@ -1731,6 +1742,31 @@ async function finishRound(){
   }
   btn.disabled = false;
   await reloadDict();
+}
+
+// Текст уже закрыт на сервере: нажали «Готово» или попросили новый текст в другом
+// окне Wortik. Нажатия отсюда не считаются — говорим об этом прямо, а не молчим.
+function roundClosedElsewhere(key){
+  if(!round || round.key !== key) return;
+  endRoundUI();
+  document.getElementById('popup').classList.remove('show');
+  setStorageStatus('bad', 'этот текст уже закрыт (в другом окне Wortik) — нажатия в нём больше не считаются');
+  reloadDict();
+}
+
+// Незаконченный текст «Из словаря» с сервера: показываем его снова, раунд продолжается.
+function restoreRound(o){
+  const ex = extractMarks(String(o.text));
+  hideSheet();
+  translation = null; alignCache = {}; transCache = null;
+  document.getElementById('transBtn').style.display = 'none';
+  document.getElementById('outTitle').textContent = 'Текст из словаря';
+  markMap = ex.map;
+  startRound(o.count || 0, o.key, o.clicked);
+  setText(ex.clean);
+  showState('none', '');
+  confirmShown();
+  setStorageStatus('ok', 'незаконченный текст «Из словаря» — дочитай и нажми «Готово»');
 }
 
 function showAlreadyInDict(word){
