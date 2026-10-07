@@ -1663,8 +1663,10 @@ async function translateChunk(chunk){
 }
 
 async function translateSentences(sents){
-  // Кусок в три предложения при потолке 6000 токенов — запас с большим избытком.
-  const CHUNK = 3;
+  // Кусок в пять предложений (было 3 до 07.10.2026): правила перевода отправляются
+  // с каждым куском, меньше кусков — меньше повторов, перевод дешевле ~на 10%.
+  // Потолок 6000 токенов — запас с большим избытком.
+  const CHUNK = 5;
   const chunks = [];
   for(let i=0;i<sents.length;i+=CHUNK) chunks.push(sents.slice(i,i+CHUNK));
 
