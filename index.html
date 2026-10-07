@@ -997,6 +997,7 @@ async function loadDict(){
     if(c && c.closed && c.confirmed){
       setStorageStatus('ok', `прошлый раунд закрыт — вспомнил: ${c.ok}, забыл: ${c.forgot}`);
     }
+    if(!settingsReady) applySettings(r.settings);
     if(r.open_round && r.open_round.text) restoreRound(r.open_round);
   }catch(e){
     dict = [];
@@ -1267,6 +1268,48 @@ document.getElementById('pvCancel').onclick = () => {
 };
 
 /* ================== SETTINGS ================== */
+// Пункт 10 (07.10.2026): уровень, длина, плотность, «сразу с переводом» и темы
+// хранятся в базе и приезжают при заходе (words → start). Режим не запоминаем.
+let wantTrans = false;          // выбор человека «сразу с переводом» (в «Из словаря» флажок выключен принудительно)
+let settingsReady = false;      // пока настройки с сервера не применены — ничего не сохраняем
+let settingsTimer = null;
+function collectSettings(){
+  return {
+    level: document.getElementById('level').value,
+    len: currentLen, dens: currentDens, trans: wantTrans,
+    tags: Array.from(selectedTags)
+  };
+}
+// сохраняем через секунду после последнего изменения — чтобы не слать запрос на каждый клик
+function saveSettingsSoon(){
+  if(!settingsReady) return;
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(() => { api('settings', collectSettings()).catch(() => {}); }, 1000);
+}
+function applySettings(st){
+  if(st){
+    const lvl = document.getElementById('level');
+    if([...lvl.options].some(o => o.value === st.level)) lvl.value = st.level;
+    if(LENGTHS[st.len]){
+      currentLen = st.len;
+      document.querySelectorAll('#lenGroup .seg-btn').forEach(x => x.classList.toggle('active', x.dataset.len === st.len));
+    }
+    if([5,10,15].includes(Number(st.dens))){
+      currentDens = Number(st.dens);
+      document.querySelectorAll('#densGroup .seg-btn').forEach(x => x.classList.toggle('active', Number(x.dataset.dens) === currentDens));
+    }
+    wantTrans = !!st.trans;
+    selectedTags.clear();
+    (st.tags || []).forEach(t => { if(TAGS.includes(t)) selectedTags.add(t); });
+    updateLenDesc(); updateDensDesc(); renderTags(); updateTagInfo(); applyTransLock();
+  }
+  settingsReady = true;
+}
+document.getElementById('level').addEventListener('change', saveSettingsSoon);
+document.getElementById('transChk').addEventListener('change', e => {
+  wantTrans = e.target.checked;
+  saveSettingsSoon();
+});
 function updateLenDesc(){
   document.getElementById('lenDesc').textContent = LENGTHS[currentLen].label;
 }
@@ -1276,6 +1319,7 @@ document.querySelectorAll('#lenGroup .seg-btn').forEach(b => {
     b.classList.add('active');
     currentLen = b.dataset.len;
     updateLenDesc(); updateDensDesc();
+    saveSettingsSoon();
   };
 });
 updateLenDesc();
@@ -1286,6 +1330,7 @@ document.querySelectorAll('#densGroup .seg-btn').forEach(b => {
     b.classList.add('active');
     currentDens = parseInt(b.dataset.dens,10);
     updateDensDesc();
+    saveSettingsSoon();
   };
 });
 
@@ -1333,7 +1378,8 @@ function applyTransLock(){
   const chk  = document.getElementById('transChk');
   const wrap = document.getElementById('transChkWrap');
   chk.disabled = isReview;
-  if(isReview) chk.checked = false;
+  // в «Из словаря» перевод выключен принудительно; выйдя оттуда, возвращаем выбор человека
+  chk.checked = isReview ? false : wantTrans;
   wrap.classList.toggle('disabled', isReview);
   wrap.title = isReview ? 'в режиме повторения перевод сразу недоступен' : '';
 }
@@ -1353,6 +1399,7 @@ function renderTags(){
       const t = b.dataset.tag;
       selectedTags.has(t) ? selectedTags.delete(t) : selectedTags.add(t);
       renderTags(); updateTagInfo();
+      saveSettingsSoon();
     };
   });
 }
@@ -1373,7 +1420,7 @@ document.getElementById('tagsToggle').onclick = () => {
   w.style.display = hidden ? 'block' : 'none';
   document.getElementById('tagsToggle').textContent = hidden ? 'Темы ▲' : 'Темы ▼';
 };
-document.getElementById('clearTags').onclick = () => { selectedTags.clear(); renderTags(); updateTagInfo(); };
+document.getElementById('clearTags').onclick = () => { selectedTags.clear(); renderTags(); updateTagInfo(); saveSettingsSoon(); };
 renderTags(); updateTagInfo();
 
 function pickCategory(){
