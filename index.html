@@ -741,6 +741,15 @@ let transCache = null;         // last fetched translation, for the show/hide to
 let currentLen = "M";
 let currentDens = 10;
 let currentMode = "topic";
+// Тема текста на экране — отправляется модели вместе с переводом куска и с кликом по слову,
+// чтобы многозначное слово переводилось по теме (пункт 19б, 07.10.2026): «По теме» — тема
+// человека, «Рандомно» — придуманная моделью, «Из словаря» — выбранные темы (если есть).
+let textTopic = '';
+function topicHint(){
+  return textTopic
+    ? `Тема текста: ${textTopic}. Многозначные слова переводи в значении, которое подходит к этой теме.\n\n`
+    : '';
+}
 let dictView = "active";
 let page = 0;
 let pendingWord = "", pendingCtx = "";
@@ -1525,8 +1534,62 @@ function highlightAligned(el){
 }
 
 
+/* ---- деление текста на предложения (пункт 19а, 07.10.2026) ----
+   Раньше резали на каждой точке — и «z. B.», «ca. 20», «am 3. Oktober», «03.10.2026»
+   разваливались на куски: перевод съезжал, клик по слову получал обрывок предложения.
+   Теперь граница — только знак конца (. ! ? …), после него (и после закрывающих кавычек)
+   пробел, и дальше новое предложение с большой буквы, цифры или открывающей кавычки.
+   Точка НЕ граница: после сокращения из списка (и слов на -str: «Hauptstr.»), после
+   порядкового числа до 3 цифр («3. Oktober», «19. Jahrhundert»), если дальше маленькая буква.
+   Но если после сокращения или числа идёт слово, которым начинают предложение
+   (Das, Er, Wir, Dann…) — это всё-таки граница: «… usw. Danach …», «… Nr. 12. Das …». */
+const SENT_ABBR = new Set(('z b d h u a o ä i r t s v g e w ' +
+  'ca bzw usw etc evtl ggf inkl exkl max min mind ca vgl bspw sog ggü zzgl abzgl gem ' +
+  'nr dr prof str tel hr fr frl jh jhd mio mrd abs ff bd hrsg uvm vs ehem gegr ' +
+  'jan feb febr mär apr jun jul aug sep sept okt nov dez allg bes bzgl dt engl franz ital ' +
+  'eigtl einschl erg evtl gesch insb jhs lt nachm vorm od rd sek std tsd urspr verh zt'
+).split(/\s+/));
+const SENT_OPEN = /[A-ZÄÖÜ0-9„“"«‚'(\[]/;
+// слова, которые не бывают существительным после «3.» или «z. B.» — значит, новое предложение
+const SENT_STARTERS = new Set(('der die das den dem des ein eine einen einem einer er sie es ich du wir ihr man ' +
+  'mein meine unser unsere dein deine sein seine ihre dies diese dieser dieses jeder jede alle ' +
+  'dann danach davor dabei deshalb darum daher trotzdem außerdem zuerst später jetzt nun heute morgen gestern ' +
+  'hier dort da so auch aber und oder doch denn leider zum zur am im in an auf aus mit nach vor bei ' +
+  'wenn weil als ob dass obwohl während wie was wo wer warum wann viele manche einige es').split(/\s+/));
+function splitSentences(text){
+  const out = [];
+  const re = /([.!?…]+)([“”"'»«‘’)\]]*)(\s+|$)/g;
+  let start = 0, m;
+  while((m = re.exec(text))){
+    const endPunct = m.index + m[1].length + m[2].length;   // конец знака и кавычек
+    const nextPos = m.index + m[0].length;                  // начало следующего слова
+    if(nextPos >= text.length){ break; }                    // конец текста — хвост ниже
+    const next = text[nextPos];
+    let split = SENT_OPEN.test(next);
+    if(split && m[1] === '.'){
+      // слово перед точкой
+      const before = text.slice(start, m.index).match(/([0-9]+|[A-Za-zÄÖÜäöüß]+)$/);
+      const w = before ? before[1] : '';
+      const lw = w.toLowerCase();
+      const isAbbr = /^[0-9]{1,3}$/.test(w)                         // «am 3. Oktober»
+        || SENT_ABBR.has(lw) || /[a-zäöü]str$/.test(lw);            // «z. B.», «ca.», «Hauptstr.»
+      if(isAbbr){
+        const nw = (text.slice(nextPos).match(/^[A-Za-zÄÖÜäöüß]+/) || [''])[0].toLowerCase();
+        split = SENT_STARTERS.has(nw);                              // «… usw. Danach …» — граница
+      }
+    }
+    if(split){
+      out.push(text.slice(start, endPunct));
+      start = endPunct;                                     // пробел уходит к следующему, как раньше
+    }
+  }
+  if(start < text.length) out.push(text.slice(start));
+  return out.filter(x => x.trim());
+}
+
 function setText(text){
-  sentences = text.match(/[^.!?]+[.!?]*/g) || [text];
+  sentences = splitSentences(text);
+  if(!sentences.length) sentences = [text];
   translation = null; alignCache = {};
   paintSheet();
 }
@@ -1581,7 +1644,7 @@ function baseRules(level, lenSpec){
 // Не все — спросить ещё раз. Опять не все — показать кусок одним абзацем,
 // чтобы ничего не съехало (раздел 5b ТЗ).
 async function translateChunk(chunk){
-  const content = chunk.map((sent, i) => `${i + 1}. ${sent.replace(/\s+/g, ' ').trim()}`).join('\n');
+  const content = topicHint() + chunk.map((sent, i) => `${i + 1}. ${sent.replace(/\s+/g, ' ').trim()}`).join('\n');
   let map = {};
   for(let attempt = 1; attempt <= 2; attempt++){
     const out = await callClaude({
@@ -1665,6 +1728,7 @@ async function runGeneration(opts){
   transCache = null;
   document.getElementById('transBtn').style.display = 'none';
   document.getElementById('outTitle').textContent = isReview ? 'Текст из словаря' : (opts.topic || 'Текст');
+  textTopic = isReview ? Array.from(selectedTags).join(', ') : (opts.topic || '');
   showState('loading', isReview ? 'собираю текст из твоих слов…' : 'печатает текст…');
 
   try{
@@ -1707,6 +1771,7 @@ async function runGeneration(opts){
       const m = out.match(/^\s*ТЕМА:\s*(.+)$/mi);
       if(m){
         const topic = m[1].trim();
+        textTopic = topic;
         document.getElementById('topic').value = topic;
         document.getElementById('outTitle').textContent = topic;
         out = out.slice(out.indexOf(m[0]) + m[0].length).trim();
@@ -1862,6 +1927,7 @@ function restoreRound(o){
   translation = null; alignCache = {}; transCache = null;
   document.getElementById('transBtn').style.display = 'none';
   document.getElementById('outTitle').textContent = 'Текст из словаря';
+  textTopic = Array.from(selectedTags).join(', ');
   markMap = ex.map;
   startRound(o.count || 0, o.key, o.clicked);
   setText(ex.clean);
@@ -1911,10 +1977,11 @@ async function openPopup(el){
       system:`Тебе дают немецкое предложение и одно слово из него. Верни СТРОГО валидный JSON без markdown:
 {"lemma":"...","translation":"...","separable_prefix":"...","ru_match":"..."}
 - lemma: словарная форма именно в том значении и той части речи, как слово употреблено здесь. Глагол — инфинитив; если это отделяемый глагол и приставка стоит в этом же предложении отдельно — верни полный инфинитив слитно (vorbereiten), а приставку в separable_prefix точно как в предложении. Существительное — с артиклем der/die/das в единственном числе.
-- translation: русский перевод СЛОВАРНОЙ ФОРМЫ (lemma), а не формы из предложения. Существительное переводи единственным числом, глагол — инфинитивом. Значение выбирай по контексту предложения, но форму перевода давай словарную. Пример: в тексте "Jahren" → lemma "das Jahr", translation "год" (не "годы"). 1-4 слова.
+- translation: русский перевод СЛОВАРНОЙ ФОРМЫ (lemma), а не формы из предложения. Существительное переводи единственным числом, глагол — инфинитивом. Значение выбирай по контексту предложения (и по теме текста, если она дана), но форму перевода давай словарную. Пример: в тексте "Jahren" → lemma "das Jahr", translation "год" (не "годы"). 1-4 слова.
 - separable_prefix: приставка или "" если неприменимо.
 - ru_match: если дан русский перевод предложения — выпиши из него ДОСЛОВНО тот кусок, который соответствует этому слову (1-3 слова, ровно как в переводе). Если перевода нет или соответствия не видно — "".`,
       messages:[{ role:"user", content:
+        (textTopic ? `Тема текста: "${textTopic}"\n` : '') +
         `Предложение: "${pendingCtx}"\nСлово: "${pendingWord}"` +
         (ruSent ? `\nРусский перевод предложения: "${ruSent}"` : '')
       }]
