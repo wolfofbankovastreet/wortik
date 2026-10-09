@@ -929,6 +929,13 @@ function showQuota(reason, msg, renewAt){
   }
   veil.onclick = e => { if(e.target === veil) close(); };
   document.body.appendChild(veil);
+  logStep('wall', null, reason || 'other');
+}
+
+// Счётчик воронки оплаты (пункт 17а, 09.10.2026, раздел 51 ТЗ): шаги, которые видит
+// только приложение, — сервер пишет их в pay_events. Ответ не ждём, ошибки не важны.
+function logStep(step, product, detail){
+  api('event', { step, product: product || null, detail: detail || null }).catch(() => {});
 }
 
 /* ================== ОПЛАТА (пункт 9) ================== */
@@ -949,6 +956,7 @@ async function refreshShop(){
 }
 
 async function openShop(){
+  logStep('shop');
   document.querySelectorAll('.shop-veil').forEach(x => x.remove());
   const veil = document.createElement('div');
   veil.className = 'shop-veil';
@@ -1054,7 +1062,11 @@ async function buy(code){
     catch(e){ shopError('Не получилось. Попробуй ещё раз.'); return; }
     const tg = window.Telegram && window.Telegram.WebApp;
     if(tg && tg.openInvoice){
-      tg.openInvoice(link, status => { if(status === 'paid') afterPaid(); });
+      tg.openInvoice(link, status => {
+        if(status === 'paid') afterPaid();
+        else if(status === 'cancelled') logStep('closed', code);   // закрыл, не заплатив
+        else if(status === 'failed') logStep('failed', code);
+      });
     } else if(tg && tg.openTelegramLink){
       tg.openTelegramLink(link);
     } else {
