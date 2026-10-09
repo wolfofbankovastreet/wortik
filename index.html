@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wortjagd</title>
+<title>Wortik</title>
 <meta name="theme-color" content="#EEF2E9">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -355,6 +355,38 @@
   .quota-box button{width:100%;padding:12px;border:0;border-radius:var(--r-md);background:var(--accent);color:var(--accent-ink);font-weight:600;font-size:15px;cursor:pointer;}
   .quota-warn{position:fixed;left:12px;right:12px;top:12px;z-index:999;background:var(--amber-bg);border:1px solid var(--amber-line);color:#6B5418;border-radius:var(--r-md);padding:12px 40px 12px 14px;font-size:14px;line-height:1.45;box-shadow:var(--shadow-md);}
   .quota-warn button{position:absolute;right:8px;top:8px;border:0;background:transparent;font-size:18px;line-height:1;color:inherit;cursor:pointer;padding:4px 6px;}
+  /* оплата (пункт 9): кнопки в окнах отказа, витрина «Тарифы» */
+  .quota-box .q-actions{display:flex;flex-direction:column;gap:8px;}
+  .quota-box button.q-second{background:transparent;color:var(--ink);border:1px solid var(--line-2);font-weight:600;}
+  .topbar{display:flex;justify-content:flex-end;margin:0 0 8px;}
+  .shop-btn{height:34px;padding:0 14px;font-size:14px;border-radius:999px;background:var(--accent-tint);color:var(--accent-text);font-weight:700;}
+  .shop-btn:hover{background:var(--accent-tint);}
+  .shop-veil{position:fixed;inset:0;background:rgba(20,24,19,.45);display:flex;align-items:flex-end;justify-content:center;z-index:1001;}
+  .shop-box{background:var(--surface);color:var(--ink);width:100%;max-width:480px;max-height:92vh;overflow:auto;border-radius:var(--r-lg) var(--r-lg) 0 0;box-shadow:var(--shadow-lg);padding:20px 16px calc(18px + env(safe-area-inset-bottom));}
+  .shop-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+  .shop-head h3{margin:0;font-size:19px;flex:1;}
+  .shop-head .x{background:transparent;color:var(--ink-mute);font-size:22px;padding:2px 8px;line-height:1;}
+  .shop-now{color:var(--accent-text);font-size:14px;margin:0 0 12px;}
+  .shop-card{border:1px solid var(--line-2);border-radius:var(--r-md);padding:14px;margin-bottom:10px;}
+  .shop-card.mine{border-color:var(--accent);}
+  .shop-card .top{display:flex;align-items:baseline;gap:8px;}
+  .shop-card .name{font-weight:700;font-size:16px;flex:1;}
+  .shop-card .tag-mine{font-size:12px;color:var(--accent-text);font-weight:700;}
+  .shop-card .stars{font-size:22px;font-weight:800;}
+  .shop-card .info{background:transparent;color:var(--ink-mute);border:1px solid var(--line-2);border-radius:50%;width:22px;height:22px;padding:0;font-size:13px;line-height:20px;font-weight:700;}
+  .shop-card .eur{color:var(--ink-mute);font-size:13px;margin:2px 0 6px;}
+  .shop-card .desc{font-size:14px;line-height:1.45;margin-bottom:10px;}
+  .shop-card .buy{width:100%;padding:11px;}
+  .shop-packs{border-radius:var(--r-md);padding:10px 10px 2px;margin:4px -10px 10px;}
+  .shop-packs.hot{background:var(--amber-bg);border:1px solid var(--amber-line);}
+  .shop-packs h4{margin:4px 0 8px;font-size:15px;}
+  .shop-infotext{background:var(--surface-2);border-radius:var(--r-md);padding:12px;font-size:13.5px;line-height:1.5;margin:0 0 12px;}
+  .shop-foot{color:var(--ink-mute);font-size:12.5px;line-height:1.45;margin-top:6px;}
+  .shop-err{color:#8A4A44;font-size:13.5px;margin:0 0 10px;}
+  .confirm-veil{z-index:1002;}
+  .confirm-veil .quota-box p{color:var(--ink);}
+  body.force-dark .shop-err{color:#F0BDB5;}
+  @media (prefers-color-scheme: dark){ body:not(.force-light) .shop-err{color:#F0BDB5;} }
 
   .sugg{
     position:absolute;top:46px;left:0;right:0;z-index:20;
@@ -558,9 +590,11 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Wortjagd</h1>
+    <h1>Wortik</h1>
   </header>
   <div class="rule"></div>
+  <!-- пункт 9: витрина. Своя шапка в Telegram скрыта (там шапка Telegram) — кнопка отдельной строкой -->
+  <div class="topbar"><button type="button" id="shopBtn" class="shop-btn">⭐ Тарифы</button></div>
 
   <!-- ============ GENERATOR ============ -->
   <div class="panel">
@@ -851,19 +885,199 @@ const QUOTA_TITLES = {
   expired: 'Подписка закончилась'
 };
 let quotaShownAt = 0;
-function showQuota(reason, msg){
+// Пункт 9 (08.10.2026, раздел 44 ТЗ): тексты окон — здесь, в приложении (сервер присылает
+// только причину и дату обновления); в каждом окне — кнопки покупки.
+// «Объём закончился»: сначала пакет, ниже — тарифы (решение 08.10.2026).
+function quotaText(reason, renewAt){
+  if(reason === 'no_plan') return 'Wortik работает по подписке. Начни с пробного — 5 дней.';
+  if(reason === 'trial_over') return 'Пробный период закончился. Чтобы продолжить, оформи подписку.';
+  if(reason === 'expired') return 'Подписка закончилась. Продли её, чтобы продолжить.';
+  // без даты (решение 08.10.2026, раздел 46 ТЗ): дата есть в витрине («до 4 ноября»);
+  // «обновится» было бы неверно для тех, кто сам отменил подписку в Telegram
+  return 'Объём на этот месяц закончился.';
+}
+function showQuota(reason, msg, renewAt){
+  if(reason === 'empty') volumeOut = true;
   // подсказки при вводе слова шлют запрос на каждую букву — окно не чаще раза в 15 с
-  if(document.querySelector('.quota-veil') || Date.now() - quotaShownAt < 15000) return;
+  if(document.querySelector('.quota-veil') || document.querySelector('.shop-veil') || Date.now() - quotaShownAt < 15000) return;
   quotaShownAt = Date.now();
   const veil = document.createElement('div');
   veil.className = 'quota-veil';
-  veil.innerHTML = '<div class="quota-box"><h3></h3><p></p><button type="button">Понятно</button></div>';
+  veil.innerHTML = '<div class="quota-box"><h3></h3><p></p><div class="q-actions"></div></div>';
   veil.querySelector('h3').textContent = QUOTA_TITLES[reason] || QUOTA_TITLES.empty;
-  veil.querySelector('p').textContent = msg;
-  veil.querySelector('button').onclick = () => veil.remove();
-  veil.onclick = e => { if(e.target === veil) veil.remove(); };
+  veil.querySelector('p').textContent = QUOTA_TITLES[reason] ? quotaText(reason, renewAt) : msg;
+  const acts = veil.querySelector('.q-actions');
+  const close = () => veil.remove();
+  const btn = (label, onClick, second) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label;
+    if(second) b.className = 'q-second';
+    b.onclick = onClick;
+    acts.appendChild(b);
+  };
+  const prices = (shopState && shopState.prices) || {};
+  if(reason === 'no_plan' && (!shopState || shopState.trial_ok)){
+    btn('Попробовать за ' + (prices.trial ?? 55) + ' ⭐', () => buy('trial'));
+    btn('Все тарифы', () => { close(); openShop(); }, true);
+  } else if(reason === 'empty' && (!shopState || shopState.pack_ok)){
+    btn('Пакет ' + (prices.pack_s ?? 110) + ' ⭐', () => buy('pack_s'));
+    btn('Большой пакет ' + (prices.pack_l ?? 275) + ' ⭐', () => buy('pack_l'), true);
+    btn('Тарифы', () => { close(); openShop(); }, true);
+  } else {
+    btn('Тарифы', () => { close(); openShop(); });
+    btn('Понятно', close, true);
+  }
+  veil.onclick = e => { if(e.target === veil) close(); };
   document.body.appendChild(veil);
 }
+
+/* ================== ОПЛАТА (пункт 9) ================== */
+// Витрина «Тарифы»: цены в звёздах приходят с сервера (тестовым аккаунтам — по 1 ⭐).
+// Под ценой — «≈ X €» всегда в евро по средней цене звёзд (раздел 37 ТЗ); у тестовых
+// цен евро не пишем. После оплаты — без отдельного сообщения: окно закрывается,
+// приложение перечитывает витрину (решение 08.10.2026).
+let shopState = null;      // ответ сервера: sub, trial_ok, pack_ok, prices
+let volumeOut = false;     // в этой сессии уже было «Объём закончился» — пакеты выделяем
+const SHOP_STARS = { trial: 55, small: 330, big: 660, pack_s: 110, pack_l: 275 };
+const SHOP_EUR   = { trial: '1,10', small: '6,80', big: '13,50', pack_s: '2,30', pack_l: '5,60' };
+const PLAN_TITLE = { trial: 'Пробный', small: 'Тариф Basic', big: 'Тариф Pro', owner: 'Подписка владельца' };
+const SHOP_INFO = 'Цена указана в звёздах Telegram. Сколько это в деньгах, зависит от того, где вы покупаете звёзды — в App Store, Google Play или в боте Telegram: цены там отличаются, а в больших пакетах звёзды дешевле. Точную сумму в вашей валюте Telegram покажет перед оплатой.';
+
+async function refreshShop(){
+  try{ const r = await api('shop'); shopState = r.shop || null; }catch(_){}
+  return shopState;
+}
+
+async function openShop(){
+  document.querySelectorAll('.shop-veil').forEach(x => x.remove());
+  const veil = document.createElement('div');
+  veil.className = 'shop-veil';
+  veil.innerHTML = '<div class="shop-box"><div class="shop-head"><h3>Тарифы</h3><button type="button" class="x" aria-label="закрыть">×</button></div><div class="shop-body"><p class="shop-now">загружаю…</p></div></div>';
+  veil.querySelector('.x').onclick = () => veil.remove();
+  veil.onclick = e => { if(e.target === veil) veil.remove(); };
+  document.body.appendChild(veil);
+  await refreshShop();
+  renderShop(veil);
+}
+
+function renderShop(veil){
+  const body = veil.querySelector('.shop-body');
+  const s = shopState;
+  if(!s){ body.innerHTML = '<p class="shop-err">Не получилось. Попробуй ещё раз.</p>'; return; }
+  const sub = s.sub;
+  const parts = [];
+  if(sub){
+    const till = new Date(sub.expires_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+    parts.push(`<p class="shop-now">Сейчас: ${escapeHtml(PLAN_TITLE[sub.plan] || sub.plan)}, до ${till}</p>`);
+  }
+  parts.push('<div class="shop-infotext" style="display:none"></div><p class="shop-err" style="display:none"></p>');
+  const card = (code, desc, btnLabel) => {
+    const mine = sub && sub.plan === code;
+    const price = s.prices[code];
+    const eur = price === SHOP_STARS[code] ? `≈ ${SHOP_EUR[code]} €` : 'тестовая цена';
+    return `<div class="shop-card${mine ? ' mine' : ''}">
+      <div class="top"><span class="name">${PLAN_TITLE[code] || ''}</span>${mine ? '<span class="tag-mine">Твой тариф</span>' : ''}</div>
+      <div class="top"><span class="stars">${price} ⭐</span><button type="button" class="info" aria-label="что это">i</button></div>
+      <div class="eur">${eur}</div>
+      <div class="desc">${desc}</div>
+      <button type="button" class="buy" data-buy="${code}">${mine ? 'Оформить заново' : btnLabel}</button>
+    </div>`;
+  };
+  if(s.trial_ok) parts.push(card('trial', 'Примерно 5 больших текстов с переводом. Действует 5 дней.', 'Попробовать'));
+  parts.push(card('small', 'Примерно 3 текста M в день. Месячная подписка.', 'Оформить'));
+  parts.push(card('big', 'Примерно 3 текста XL в день. Месячная подписка.', 'Оформить'));
+  if(s.pack_ok){
+    const pack = (code, name, desc) => {
+      const price = s.prices[code];
+      const eur = price === SHOP_STARS[code] ? `≈ ${SHOP_EUR[code]} €` : 'тестовая цена';
+      return `<div class="shop-card">
+        <div class="top"><span class="name">${name}</span></div>
+        <div class="top"><span class="stars">${price} ⭐</span><button type="button" class="info" aria-label="что это">i</button></div>
+        <div class="eur">${eur}</div>
+        <div class="desc">${desc}</div>
+        <button type="button" class="buy" data-buy="${code}">Купить</button>
+      </div>`;
+    };
+    parts.push(`<div class="shop-packs${volumeOut ? ' hot' : ''}"><h4>Докупить объём</h4>
+      ${pack('pack_s', 'Пакет', 'Примерно 11 больших текстов сверх месячного объёма.')}
+      ${pack('pack_l', 'Большой пакет', 'Примерно 27 больших текстов сверх месячного объёма.')}
+    </div>`);
+  }
+  parts.push('<p class="shop-foot">Отменить подписку можно в Telegram: Настройки → Звёзды → Подписки.</p>');
+  body.innerHTML = parts.join('');
+  const info = body.querySelector('.shop-infotext');
+  info.textContent = SHOP_INFO;
+  body.querySelectorAll('.info').forEach(b => b.onclick = () => { info.style.display = info.style.display === 'none' ? '' : 'none'; if(info.style.display === '') info.scrollIntoView({ block: 'nearest' }); });
+  body.querySelectorAll('[data-buy]').forEach(b => b.onclick = () => buy(b.dataset.buy));
+}
+
+function shopError(text){
+  const el = document.querySelector('.shop-veil .shop-err');
+  if(el){ el.textContent = text; el.style.display = ''; }
+  else setStorageStatus('bad', text);
+}
+
+// Купить: сервер даёт ссылку на счёт (и заранее проверяет, можно ли), Telegram показывает
+// окно оплаты. «Оплата прошла» сервер узнаёт от Telegram (функция bot), не от приложения —
+// здесь только ждём, пока витрина на сервере обновится.
+let buying = false;
+// Подтверждение перед новой подпиской, если уже есть Basic / Pro: новая начинается сразу
+// и заменяет текущую (остаток не переносится) — говорим об этом скромно (решение 08.10.2026)
+function confirmSwitch(code){
+  const sub = shopState && shopState.sub;
+  if(!sub || !['small', 'big'].includes(code) || !['small', 'big'].includes(sub.plan)) return Promise.resolve(true);
+  const till = new Date(sub.expires_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  const text = code === sub.plan
+    ? `${PLAN_TITLE[sub.plan]} начнётся заново сегодня: полный объём на 30 дней.`
+    : `Сейчас у тебя ${PLAN_TITLE[sub.plan]} до ${till}. ${PLAN_TITLE[code]} начнёт действовать сразу и заменит текущий тариф.`;
+  return new Promise(resolve => {
+    const veil = document.createElement('div');
+    veil.className = 'quota-veil confirm-veil';
+    veil.innerHTML = '<div class="quota-box"><p></p><div class="q-actions"><button type="button">Продолжить</button><button type="button" class="q-second">Отмена</button></div></div>';
+    veil.querySelector('p').textContent = text;
+    const done = ok => { veil.remove(); resolve(ok); };
+    const [yes, no] = veil.querySelectorAll('button');
+    yes.onclick = () => done(true);
+    no.onclick = () => done(false);
+    veil.onclick = e => { if(e.target === veil) done(false); };
+    document.body.appendChild(veil);
+  });
+}
+
+async function buy(code){
+  if(buying) return;
+  if(!(await confirmSwitch(code))) return;
+  buying = true;
+  try{
+    let link;
+    try{ link = (await api('invoice', { product: code })).link; }
+    catch(e){ shopError('Не получилось. Попробуй ещё раз.'); return; }
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if(tg && tg.openInvoice){
+      tg.openInvoice(link, status => { if(status === 'paid') afterPaid(); });
+    } else if(tg && tg.openTelegramLink){
+      tg.openTelegramLink(link);
+    } else {
+      window.open(link, '_blank');
+    }
+  } finally {
+    buying = false;
+  }
+}
+
+// Оплата прошла: закрываем окна и ждём, пока бот запишет покупку (обычно секунды)
+async function afterPaid(){
+  document.querySelectorAll('.shop-veil, .quota-veil').forEach(x => x.remove());
+  quotaShownAt = 0;
+  volumeOut = false;
+  const before = JSON.stringify(shopState);
+  for(let i = 0; i < 6; i++){
+    await new Promise(r => setTimeout(r, 1500));
+    await refreshShop();
+    if(JSON.stringify(shopState) !== before) break;
+  }
+}
+document.getElementById('shopBtn').onclick = openShop;
 // Строка «осталось 20 / 10 / 5 %». Сервер присылает порог один раз — показываем как есть.
 function showQuotaWarn(pct){
   document.querySelectorAll('.quota-warn').forEach(x => x.remove());
@@ -902,9 +1116,13 @@ async function postGenerate(body, attempt){
     let msg = 'ошибка сервера '+res.status;
     let j = null;
     try{ j=JSON.parse(bodyText); if(j.message) msg = j.message; else if(j.error) msg = j.error; }catch(_){}
-    // объёма нет (пункт 8): модель не вызывалась — показываем окно один раз на запрос
-    if(res.status === 402 && j && j.error === 'quota') showQuota(j.reason, msg);
-    throw new Error(msg);
+    // объёма нет (пункт 8): модель не вызывалась — показываем окно один раз на запрос.
+    // Текст — приложения (пункт 9): с датой обновления и без «оформить можно будет скоро»
+    const isQuota = res.status === 402 && j && j.error === 'quota';
+    if(isQuota){ msg = quotaText(j.reason, j.renew_at); showQuota(j.reason, msg, j.renew_at); }
+    const err = new Error(msg);
+    if(isQuota) err.quota = j.reason;
+    throw err;
   }
 
   let data;
@@ -1007,6 +1225,7 @@ async function loadDict(){
       setStorageStatus('ok', `прошлый раунд закрыт — вспомнил: ${c.ok}, забыл: ${c.forgot}`);
     }
     if(!settingsReady) applySettings(r.settings);
+    shopState = r.shop || null;   // витрина (пункт 9); нет — откроется при нажатии «⭐ Тарифы»
     if(r.open_round && r.open_round.text) restoreRound(r.open_round);
   }catch(e){
     dict = [];
@@ -2023,7 +2242,10 @@ async function openPopup(el){
   }catch(e){
     document.getElementById('popupTrans').style.display = '';
     document.getElementById('popupAdd').style.display = '';
-    document.getElementById('popupNote').textContent = 'не получилось автоматически — впиши перевод сам';
+    // объём кончился (пункт 9): пишем причину, а не «сбой»; ручное добавление остаётся
+    document.getElementById('popupNote').textContent = e && e.quota
+      ? (e.quota === 'no_plan' ? 'перевод недоступен — нужна подписка' : 'перевод недоступен — закончился объём')
+      : 'не получилось автоматически — впиши перевод сам';
   }
   document.getElementById('popupTrans').focus();
 }
